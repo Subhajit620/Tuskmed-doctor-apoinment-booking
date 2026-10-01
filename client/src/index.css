@@ -1,0 +1,187 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design system
+ * -------------
+ * Color:   teal "brand" scale (clinical/calm) + slate neutrals (cool-toned,
+ *          harmonizes with teal) + amber/emerald/red used strictly as
+ *          semantic status color, never as a second decorative accent.
+ * Type:    Sora (display/headings - confident, geometric) paired with
+ *          Inter (body/UI - built for dense tables, forms, tabular figures).
+ * Surface: soft shadows + a consistent 1px border read as "elevated card",
+ *          never a heavy drop shadow; radii step from md (controls) to
+ *          xl (cards/panels).
+ */
+
+/*
+ * Theming: shared components below read color from CSS custom properties,
+ * not fixed Tailwind utilities, specifically so a subtree can be retinted
+ * by wrapping it in a class that redefines these variables - see
+ * .theme-gold, used to bring the admin panel onto the same warm gold/cream
+ * palette as the login page without editing every admin panel file.
+ */
+:root {
+  --brand-50: #EFFCFA;
+  --brand-100: #D7F4F0;
+  --brand-200: #AFE8E1;
+  --brand-400: #45BFB2;
+  --brand-500: #1E9E92;
+  --brand-600: #157E76;
+  --brand-700: #11635D;
+  --brand-800: #0F4E49;
+  --brand-900: #0C3C39;
+}
+
+/* Gold/cream/navy - matches Login.jsx's palette exactly (#CAA067 / #B88F55
+   / #2B434C). Wrap a subtree in .theme-gold to apply it to every .card,
+   .btn-*, .input and .label inside - see AdminDashboard.jsx. */
+.theme-gold {
+  --brand-50: #FBF3E9;
+  --brand-100: #F5E4CC;
+  --brand-200: #EED8C5;
+  --brand-400: #D4B181;
+  --brand-500: #CAA067;
+  --brand-600: #CAA067;
+  --brand-700: #B88F55;
+  --brand-800: #9C7743;
+  --brand-900: #2B434C;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 font-sans antialiased;
+}
+
+h1, h2, h3, h4 {
+  @apply font-display text-slate-900;
+  text-wrap: balance;
+}
+
+::selection {
+  background-color: var(--brand-200);
+  color: var(--brand-900);
+}
+
+/* ---- Buttons ---- */
+.btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold
+    transition-all duration-150 ease-out active:scale-[0.97]
+    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[var(--brand-500)]
+    disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none disabled:active:scale-100;
+}
+.btn-primary {
+  @apply btn text-white shadow-card;
+  background-color: var(--brand-600);
+}
+.btn-primary:hover { background-color: var(--brand-700); }
+.btn-primary:active { background-color: var(--brand-800); }
+.btn-secondary {
+  @apply btn bg-white border border-slate-300 shadow-card;
+  color: var(--brand-700);
+}
+.btn-secondary:hover { border-color: var(--brand-400); color: var(--brand-800); background-color: color-mix(in srgb, var(--brand-50) 60%, transparent); }
+.btn-ghost {
+  @apply btn bg-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-900;
+}
+
+/* ---- Surfaces ---- */
+.card {
+  @apply bg-white rounded-xl shadow-card border border-slate-200/80 p-5;
+}
+
+/* ---- Form controls ---- */
+.input {
+  @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900
+    placeholder:text-slate-400 transition-shadow duration-150
+    focus:outline-none focus:ring-2 focus:ring-[var(--brand-500)]
+    disabled:bg-slate-50 disabled:text-slate-400;
+}
+.input:focus { border-color: var(--brand-500); }
+.label {
+  @apply block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1.5;
+}
+
+/* ---- Status badges - semantic color only ---- */
+.badge {
+  @apply inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full;
+}
+
+/* ---- Utility: subtle divider between stacked sections ---- */
+.section-divider {
+  @apply border-t border-slate-100 pt-4 mt-4;
+}
+
+/* ---- Ambient motion: slow drift for decorative background blobs ---- */
+@keyframes blob-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%      { transform: translate(3%, -4%) scale(1.05); }
+  66%      { transform: translate(-2%, 3%) scale(0.97); }
+}
+.animate-blob {
+  animation: blob-drift 14s ease-in-out infinite;
+}
+
+/* ---- Professional High-Fidelity Circular Orbit Animations ---- */
+@keyframes orbit-cw {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes orbit-ccw {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 0.7;
+  }
+}
+
+.animate-orbit-slow {
+  animation: orbit-cw 20s linear infinite;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.animate-orbit-reverse {
+  animation: orbit-ccw 28s linear infinite;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.animate-pulse-halo {
+  animation: pulse-glow 6s ease-in-out infinite;
+  transform-origin: center center;
+}
+
+/* Printable prescription: hide everything except the marked print area,
+ * used by the doctor's "Print prescription" button. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #prescription-print-area,
+  #prescription-print-area * {
+    visibility: visible;
+  }
+  #prescription-print-area {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+  }
+}
