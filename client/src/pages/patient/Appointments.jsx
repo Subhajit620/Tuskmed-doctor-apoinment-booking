@@ -19,6 +19,7 @@ function AppointmentCard({ appt }) {
   const opensAt = new Date(start.getTime() - JOIN_WINDOW_MINUTES_BEFORE * 60 * 1000);
   const closesAt = new Date(start.getTime() + JOIN_WINDOW_MINUTES_AFTER * 60 * 1000);
   const isExpired = now > closesAt;
+  const isPast = now > start;
   const canJoin = appt.mode === 'VIDEO' && appt.status === 'CONFIRMED' && now >= opensAt && !isExpired;
   const isCompleted = appt.status === 'COMPLETED' || appt.status === 'CANCELLED';
 

@@ -1,0 +1,162 @@
+const https = require('https');
+const env = require('../config/env');
+
+/**
+ * WhatsApp OTP delivery via AiSensy - replaces Meta Cloud API as the
+ * sending layer behind auth.js's OTP request/resend endpoints, using the
+ * existing, already-LIVE AiSensy "Tuskmed" project, its "Tuskmed OTP" API
+ * Campaign, and the APPROVED `tuskmed_otp` Authentication template (single
+ * body parameter {{1}}, Copy Code button enabled).
+ */
+
+const AISENSY_API_URL = 'https://backend.aisensy.com/campaign/t1/api/v2';
+
+const outbox = []; // in-memory log for dev/test inspection only - never holds the real API key
+
+/** AiSensy expects the full international number, no leading '+'. */
+function toAiSensyRecipient(mobile) {
+  const digits = String(mobile || '').replace(/[^\d]/g, '');
+  if (digits.length === 10) return `91${digits}`; // default to India, matching the rest of the app
+  return digits;
+}
+
+async function sendOtp(mobile, code) {
+  if (env.mock.whatsapp || !env.aisensy.apiKey) {
+    outbox.push({ mobile, note: 'otp via aisensy (mock)', at: new Date().toISOString() });
+    // eslint-disable-next-line no-console
+    console.log(`[aisensy:mock] -> ${mobile}: your TuskMed code is ${code}`);
+    return { mocked: true, id: `mock_${Date.now()}` };
+  }
+
+  if (!env.aisensy.campaignName) {
+    throw new Error('AISENSY_CAMPAIGN_NAME is not set - cannot send a live OTP without the API Campaign name.');
+  }
+
+  return sendViaAiSensy(toAiSensyRecipient(mobile), code);
+}
+
+function sendViaAiSensyPayload(payloadObj) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(payloadObj);
+    const url = new URL(AISENSY_API_URL);
+    const options = {
+      hostname: url.hostname,
+      port: 443,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      rejectUnauthorized: false,
+      timeout: 15000,
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        let body = {};
+        try {
+          body = JSON.parse(data);
+        } catch {
+          body = { raw: data };
+        }
+
+        if (res.statusCode < 200 || res.statusCode >= 300 || body.status === 'error' || body.success === false) {
+          const detail = body.message || body.error || data.slice(0, 300);
+          return reject(new Error(`AiSensy send failed (HTTP ${res.statusCode}): ${detail}`));
+        }
+
+        return resolve(body);
+      });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('AiSensy request timed out after 15 seconds.'));
+    });
+
+    req.on('error', (err) => {
+      reject(new Error(`AiSensy request failed (network error): ${err.message}`));
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Sends the OTP through AiSensy's Campaign API against the `tuskmed_otp`
+ * Authentication template. Retries with standard payload if button format is not expected.
+ */
+async function sendViaAiSensy(destination, code) {
+  try {
+    const res = await sendViaAiSensyPayload({
+      apiKey: env.aisensy.apiKey,
+      campaignName: env.aisensy.campaignName,
+      destination,
+      userName: 'TuskMed User',
+      templateParams: [code],
+      buttons: [
+        {
+          type: 'button',
+          sub_type: 'url',
+          index: 0,
+          parameters: [{ type: 'text', text: code }],
+        },
+      ],
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[aisensy] OTP sent successfully to ${destination} via campaign "${env.aisensy.campaignName}"`);
+    return res;
+  } catch (initialErr) {
+    // eslint-disable-next-line no-console
+    console.warn('[aisensy] Initial button payload returned error, retrying standard parameter payload:', initialErr.message);
+    const res = await sendViaAiSensyPayload({
+      apiKey: env.aisensy.apiKey,
+      campaignName: env.aisensy.campaignName,
+      destination,
+      userName: 'TuskMed User',
+      templateParams: [code],
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[aisensy] OTP sent successfully to ${destination} via fallback campaign parameters`);
+    return res;
+  }
+}
+
+/**
+ * Send custom campaign / notification message via AiSensy.
+ */
+async function sendCampaignMessage(mobile, { campaignName, userName = 'Patient', templateParams = [], buttons = [] } = {}) {
+  const destination = toAiSensyRecipient(mobile);
+  const activeCampaign = campaignName || env.aisensy.apptCampaignName;
+
+  if (env.mock.whatsapp || !env.aisensy.apiKey || !activeCampaign) {
+    outbox.push({ destination, note: 'aisensy campaign (mock)', templateParams, at: new Date().toISOString() });
+    // eslint-disable-next-line no-console
+    console.log(`[aisensy:mock] -> ${destination}: Campaign="${activeCampaign || 'mock'}" params=${JSON.stringify(templateParams)}`);
+    return { mocked: true, id: `mock_${Date.now()}` };
+  }
+
+  const payload = {
+    apiKey: env.aisensy.apiKey,
+    campaignName: activeCampaign,
+    destination,
+    userName,
+    templateParams,
+    ...(buttons.length ? { buttons } : {}),
+  };
+
+  const body = await sendViaAiSensyPayload(payload);
+  // eslint-disable-next-line no-console
+  console.log(`[aisensy] Notification sent successfully to ${destination} via campaign "${activeCampaign}"`);
+  return body;
+}
+
+module.exports = { sendOtp, sendCampaignMessage, toAiSensyRecipient, _outbox: outbox };
+

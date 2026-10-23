@@ -265,7 +265,7 @@ export default function BookAppointment() {
         category: category || undefined,
         promoCode: promoState === 'valid' ? appliedPromo : undefined,
       });
-      const { appointmentId, order } = bookRes.data;
+      const { appointmentId } = bookRes.data;
 
       if (file) {
         const form = new FormData();
@@ -275,12 +275,7 @@ export default function BookAppointment() {
         }).catch(() => {});
       }
 
-      // Complete payment confirmation
-      await api.post(`/appointments/${appointmentId}/confirm-payment`, {
-        gatewayPaymentId: `pay_${Date.now()}`,
-        gatewayOrderId: order.id,
-        mockOutcome: 'success',
-      });
+     
 
       setBookingSuccess({
         appointmentId,

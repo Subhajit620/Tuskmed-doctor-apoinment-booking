@@ -52,6 +52,7 @@ module.exports = {
     campaignName: process.env.AISENSY_CAMPAIGN_NAME || '',
     apptCampaignName: process.env.AISENSY_APPT_CAMPAIGN_NAME || '',
     doctorApptCampaignName: process.env.AISENSY_DOCTOR_APPT_CAMPAIGN_NAME || '',
+    reminderCampaignName: process.env.AISENSY_REMINDER_CAMPAIGN_NAME || '',
   },
   razorpay: {
     keyId: process.env.RAZORPAY_KEY_ID || '',

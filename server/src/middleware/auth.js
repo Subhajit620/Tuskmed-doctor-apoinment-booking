@@ -11,7 +11,7 @@ function setSessionCookie(res, account) {
   const token = signSession(account);
   res.cookie(env.sessionCookieName, token, {
     httpOnly: true,
-    secure: env.nodeEnv === 'production', // HTTPS-only in prod
+    secure:false,
     sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });

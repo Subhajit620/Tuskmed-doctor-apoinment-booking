@@ -2,12 +2,37 @@ const prisma = require('../db/prisma');
 const { sendReminder } = require('../integrations/whatsapp');
 const { audit } = require('../utils/audit');
 
-const REMINDER_WINDOW_MINUTES = 60; // send once an appointment is within this window
+const REMINDER_WINDOW_MINUTES = 15; // send once an appointment is within this window
+
+/** Pull a usable mobile number off a doctor record, whatever the field is called. */
+function doctorMobile(doctor) {
+  if (!doctor) return null;
+  return (
+    doctor.account?.mobile ||
+    doctor.mobile ||
+    doctor.phone ||
+    doctor.contactNumber ||
+    null
+  );
+}
+
+/** Same idea for the patient record. */
+function patientMobile(patient) {
+  if (!patient) return null;
+  return (
+    patient.mobile ||
+    patient.account?.mobile ||
+    patient.phone ||
+    patient.contactNumber ||
+    null
+  );
+}
 
 /**
  * WhatsApp reminders before the appointment. Runs on a short interval and
- * sends (at most once, tracked via `reminderSentAt`) to any CONFIRMED
- * appointment whose slot starts within the reminder window.
+ * sends (at most once, tracked via `reminderSentAt`) to BOTH the doctor and
+ * the patient of any CONFIRMED appointment whose slot starts within the
+ * reminder window.
  */
 async function sendDueReminders() {
   const now = new Date();
@@ -19,16 +44,79 @@ async function sendDueReminders() {
       reminderSentAt: null,
       slot: { start: { gte: now, lte: windowEnd } },
     },
-    include: { slot: true, doctor: true, patient: { include: { account: true } } },
+    include: {
+      slot: true,
+      doctor: { include: { account: true } },
+      patient: { include: { account: true } },
+    },
   });
 
   for (const appt of due) {
-    // eslint-disable-next-line no-await-in-loop
-    await sendReminder(appt.patient.account.mobile, { doctorName: appt.doctor.name, start: appt.slot.start });
-    // eslint-disable-next-line no-await-in-loop
-    await prisma.appointment.update({ where: { id: appt.id }, data: { reminderSentAt: new Date() } });
-    // eslint-disable-next-line no-await-in-loop
-    await audit(appt.patient.account.id, 'APPOINTMENT_REMINDER_SENT', { appointmentId: appt.id });
+    const sentTo = [];
+    try {
+      const payload = {
+        doctorName: appt.doctor?.name,
+        start: appt.slot.start,
+      };
+
+      // Each recipient is wrapped separately: one failure must not rob the
+      // other of their reminder, and reminderSentAt is set either way so a
+      // hard failure never loops every 60s.
+      const docTo = doctorMobile(appt.doctor);
+      if (!docTo) {
+        console.warn(
+          `[reminderJob] appointment ${appt.id}: doctor ${appt.doctor?.id || '?'} has no mobile, skipping`
+        );
+      } else {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await sendReminder(docTo, payload);
+          sentTo.push('DOCTOR');
+          console.log(`[reminderJob] appointment ${appt.id}: reminder sent to doctor ${docTo}`);
+        } catch (docErr) {
+          console.error(
+            `[reminderJob] appointment ${appt.id}: doctor reminder failed:`,
+            docErr.message
+          );
+        }
+      }
+
+      const patTo = patientMobile(appt.patient);
+      if (!patTo) {
+        console.warn(
+          `[reminderJob] appointment ${appt.id}: patient ${appt.patient?.id || '?'} has no mobile, skipping`
+        );
+      } else {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await sendReminder(patTo, payload);
+          sentTo.push('PATIENT');
+          console.log(`[reminderJob] appointment ${appt.id}: reminder sent to patient ${patTo}`);
+        } catch (patErr) {
+          console.error(
+            `[reminderJob] appointment ${appt.id}: patient reminder failed:`,
+            patErr.message
+          );
+        }
+      }
+
+      // eslint-disable-next-line no-await-in-loop
+      await prisma.appointment.update({
+        where: { id: appt.id },
+        data: { reminderSentAt: new Date() },
+      });
+
+      if (appt.patient?.account?.id) {
+        // eslint-disable-next-line no-await-in-loop
+        await audit(appt.patient.account.id, 'APPOINTMENT_REMINDER_SENT', {
+          appointmentId: appt.id,
+          sentTo: sentTo.join(',') || 'NONE',
+        });
+      }
+    } catch (err) {
+      // one bad appointment must not stall the batch or retry every 60s forever
+      console.error(`[reminderJob] appointment ${appt.id} failed:`, err.message);
+    }
   }
 }
 

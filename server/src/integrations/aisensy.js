@@ -48,7 +48,7 @@ function sendViaAiSensyPayload(payloadObj) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
       },
-      rejectUnauthorized: false,
+      rejectUnauthorized: true,
       timeout: 15000,
     };
 
@@ -142,6 +142,12 @@ async function sendCampaignMessage(mobile, { campaignName, userName = 'Patient',
     console.log(`[aisensy:mock] -> ${destination}: Campaign="${activeCampaign || 'mock'}" params=${JSON.stringify(templateParams)}`);
     return { mocked: true, id: `mock_${Date.now()}` };
   }
+
+  console.log('[aisensy:diagnostic]', {
+    campaignName: activeCampaign,
+    templateParamsCount: templateParams.length,
+    buttonsCount: buttons.length,
+  });
 
   const payload = {
     apiKey: env.aisensy.apiKey,

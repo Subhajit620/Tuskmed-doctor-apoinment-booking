@@ -113,8 +113,6 @@ router.post('/book', requireAuth, requireRole('PATIENT'), requireActivePatient, 
     if (slot.mode !== mode) throw new ApiError(400, 'Slot mode does not match requested mode', 'MODE_MISMATCH');
     if (new Date(slot.start).getTime() <= Date.now()) throw new ApiError(400, 'Slot is in the past', 'SLOT_PAST');
 
-    // A doctor-blocked date/mode still shows the slot (blocking doesn't
-    // delete it) but must refuse new bookings against it.
     const blocked = await prisma.blockedPeriod.findFirst({
       where: {
         doctorId,
@@ -125,11 +123,6 @@ router.post('/book', requireAuth, requireRole('PATIENT'), requireActivePatient, 
     });
     if (blocked) throw new ApiError(409, 'This doctor is unavailable on the selected date. Please pick another.', 'DATE_BLOCKED');
 
-    // Atomic conditional lock: only succeeds if the slot is still AVAILABLE.
-    // This is what actually prevents two patients from racing onto the same
-    // slot - the DB-level partial unique index on Appointment.slotId (see
-    // the slot_partial_unique migration) is the second, belt-and-braces
-    // guarantee, without permanently burning a slot after a failed attempt.
     const lockExpiresAt = new Date(Date.now() + env.rules.slotLockMinutes * 60 * 1000);
     const lockResult = await prisma.slot.updateMany({
       where: { id: slotId, status: 'AVAILABLE' },
@@ -148,8 +141,6 @@ router.post('/book', requireAuth, requireRole('PATIENT'), requireActivePatient, 
         throw new ApiError(400, `Promo code is ${evaluation.state}`, 'PROMO_' + evaluation.state.toUpperCase());
       }
 
-      // A follow-up is any booking where this patient has already had at
-      // least one prior (non-cancelled) appointment with this same doctor.
       const priorVisit = await prisma.appointment.findFirst({
         where: { patientId: req.activePatient.id, doctorId, status: { not: 'CANCELLED' } },
       });
@@ -162,28 +153,68 @@ router.post('/book', requireAuth, requireRole('PATIENT'), requireActivePatient, 
           mode,
           symptoms: symptoms || null,
           category: category || null,
-          status: 'PENDING_PAYMENT',
+          status: 'CONFIRMED',
           isFollowUp: !!priorVisit,
         },
       });
 
-      const amountInPaise = Math.round(evaluation.finalAmount * 100);
-      const order = await createOrder({
-        amountInPaise,
-        receipt: appointment.id,
-        notes: { appointmentId: appointment.id, patientId: req.activePatient.id },
-      });
+      // createRoom needs the appointment id, so the room is made after the
+      // insert and patched back in - same order as confirmAppointment.
+      let videoLink = null;
+      if (mode === 'VIDEO') {
+        try {
+          const room = await createRoom(appointment.id, slot.start);
+          videoLink = room?.url || null;
+          if (videoLink) {
+            appointment = await prisma.appointment.update({
+              where: { id: appointment.id },
+              data: { videoLink, videoRoomName: room.name || room.meetingId },
+            });
+          }
+        } catch (roomErr) {
+          console.error('[appointments] video room creation failed:', roomErr.message);
+        }
+      }
 
-      await prisma.payment.create({
-        data: {
-          appointmentId: appointment.id,
-          promoId: evaluation.promo?.id || null,
-          originalAmount: baseFee,
-          amount: evaluation.finalAmount,
-          status: 'CREATED',
-          gatewayOrderId: order.id,
-        },
-      });
+      // Notifications must never break a confirmed booking: the enclosing
+      // catch rolls back the slot and DELETES the appointment, so every
+      // WhatsApp failure has to be swallowed right here.
+      try {
+        if (req.activePatient?.mobile) {
+          await sendAppointmentConfirmation(req.activePatient.mobile, {
+            doctorName: doctor.name,
+            start: slot.start,
+            mode,
+            patientName: req.activePatient.name,
+            meetingUrl: appointment.videoLink,
+          });
+          console.log(`[appointments] patient notified at ${req.activePatient.mobile}`);
+        } else {
+          console.warn(`[appointments] patient ${req.activePatient.id} has no mobile`);
+        }
+
+        if (doctor.accountId) {
+          const doctorAccount = await prisma.account.findUnique({
+            where: { id: doctor.accountId },
+          });
+          if (doctorAccount?.mobile) {
+            await sendDoctorAppointmentNotification(doctorAccount.mobile, {
+              doctorName: doctor.name,
+              patientName: req.activePatient?.name,
+              start: slot.start,
+              mode,
+              meetingUrl: appointment.videoLink,
+            });
+            console.log(`[appointments] doctor notified at ${doctorAccount.mobile}`);
+          } else {
+            console.warn(`[appointments] doctor ${doctor.id} has no mobile`);
+          }
+        } else {
+          console.warn(`[appointments] doctor ${doctor.id} has no linked account`);
+        }
+      } catch (notifErr) {
+        console.error('[appointments] notification failed:', notifErr.message);
+      }
 
       broadcastSlotChange(doctorId, slot.start, { slotId, status: 'LOCKED' });
       await audit(req.account.id, 'APPOINTMENT_BOOKING_STARTED', {
@@ -195,14 +226,12 @@ router.post('/book', requireAuth, requireRole('PATIENT'), requireActivePatient, 
       res.status(201).json({
         appointmentId: appointment.id,
         slotLockExpiresAt: lockExpiresAt,
-        order: { id: order.id, amount: amountInPaise, currency: 'INR', keyId: order.keyId },
         fee: doctor.fee,
         discountAmount: evaluation.discountAmount,
         amountDue: evaluation.finalAmount,
+        paymentRequired: false,
       });
     } catch (innerErr) {
-      // Roll back the lock if anything after it failed, so the slot isn't
-      // stranded until the sweeper gets to it.
       await prisma.slot.updateMany({
         where: { id: slotId, status: 'LOCKED' },
         data: { status: 'AVAILABLE', lockedAt: null, lockExpiresAt: null },
@@ -384,7 +413,7 @@ router.get('/mine', requireAuth, requireRole('PATIENT'), async (req, res, next) 
     if (scope === 'upcoming') {
       // Upcoming or active ongoing appointments: CONFIRMED or PENDING, not cancelled/completed, starting or ongoing today or in future
       timeAndStatusFilter = {
-        status: { in: ['CONFIRMED', 'PENDING'] },
+        status: { in: ['CONFIRMED'] },
         OR: [
           { slot: { start: { gte: new Date(now.getTime() - 2 * 60 * 60 * 1000) } } },
           { slot: { end: { gte: now } } },

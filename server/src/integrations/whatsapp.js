@@ -44,30 +44,49 @@ async function sendWhatsAppMessage(mobile, body, options = {}) {
     const templateParams = options.templateParams || [body];
     const userName = options.userName || 'TuskMed User';
 
-    // If an AiSensy campaign is configured, send live via AiSensy
-    if (!env.mock.whatsapp && env.aisensy.apiKey && campaignName) {
-      try {
-        return await aisensy.sendCampaignMessage(mobile, {
-          campaignName,
-          userName,
-          templateParams,
-          buttons: options.buttons || [],
-        });
-      } catch (err) {
-        console.warn('[whatsapp:aisensy] Live message send failed:', err.message);
-      }
+    if (env.mock.whatsapp) {
+      outbox.push({
+        mobile,
+        body,
+        options,
+        at: new Date().toISOString(),
+      });
+      console.log(`[whatsapp:aisensy:mock] -> ${mobile}: ${body}`);
+      return {
+        mocked: true,
+        provider: 'aisensy',
+        id: `mock_${Date.now()}`,
+      };
     }
 
-    outbox.push({ mobile, body, options, at: new Date().toISOString() });
-    // eslint-disable-next-line no-console
-    console.log(`[whatsapp:aisensy:mock] -> ${mobile}: ${body}`);
-    return { mocked: true, provider: 'aisensy', id: `mock_${Date.now()}` };
+    if (!env.aisensy.apiKey) {
+      throw new Error(
+        'AiSensy live sending is enabled, but AISENSY_API_KEY is missing.'
+      );
+    }
+
+    if (!campaignName) {
+      throw new Error(
+        'AiSensy live sending is enabled, but the campaign name is missing.'
+      );
+    }
+
+    try {
+      return await aisensy.sendCampaignMessage(mobile, {
+        campaignName,
+        userName,
+        templateParams,
+        buttons: options.buttons || [],
+      });
+    } catch (err) {
+      console.error('[whatsapp:aisensy] Live message send failed:', err.message);
+      throw err;
+    }
   }
 
   // Meta Cloud API path
   if (env.mock.whatsapp || !env.whatsapp.token) {
     outbox.push({ mobile, body, at: new Date().toISOString() });
-    // eslint-disable-next-line no-console
     console.log(`[whatsapp:mock] -> ${mobile}: ${body}`);
     return { mocked: true, id: `mock_${Date.now()}` };
   }
@@ -80,10 +99,8 @@ async function sendWhatsAppMessage(mobile, body, options = {}) {
       text: { body },
     });
   } catch (err) {
-    // eslint-disable-next-line no-console
     console.warn('[whatsapp] Real WhatsApp delivery failed (token may be expired):', err.message);
     outbox.push({ mobile, body, at: new Date().toISOString(), error: err.message });
-    // eslint-disable-next-line no-console
     console.log(`[whatsapp:fallback] -> ${mobile}: ${body}`);
     return { mocked: true, fallback: true, id: `mock_${Date.now()}` };
   }
@@ -98,7 +115,6 @@ async function sendOtp(mobile, code) {
 
   if (env.mock.whatsapp || !env.whatsapp.token) {
     outbox.push({ mobile, body: `[otp template] code=${code}`, at: new Date().toISOString() });
-    // eslint-disable-next-line no-console
     console.log(`[whatsapp:mock] -> ${mobile}: your TuskMed code is ${code}`);
     return { mocked: true, id: `mock_${Date.now()}` };
   }
@@ -123,10 +139,8 @@ async function sendOtp(mobile, code) {
       },
     });
   } catch (err) {
-    // eslint-disable-next-line no-console
     console.warn('[whatsapp] Real OTP send failed (token may be expired):', err.message);
     outbox.push({ mobile, body: `[otp template] code=${code}`, at: new Date().toISOString(), error: err.message });
-    // eslint-disable-next-line no-console
     console.log(`[whatsapp:fallback] -> ${mobile}: your TuskMed code is ${code}`);
     return { mocked: true, fallback: true, id: `mock_${Date.now()}` };
   }
@@ -145,52 +159,129 @@ function cleanDoctorName(name) {
 }
 
 async function sendVideoConsultationConfirmed(mobile, { patientName, doctorName, start, meetingUrl }) {
-  const dateStr = new Date(start).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-  const timeStr = new Date(start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const dateStr = new Date(start).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+  const timeStr = new Date(start).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
   const fullMeetingUrl = formatMeetingUrl(meetingUrl);
   const doc = cleanDoctorName(doctorName);
-  const body = `Hello ${patientName || 'Patient'},\n\nYour video consultation with Dr. ${doc} has been confirmed.\n\nDate: ${dateStr}\nTime: ${timeStr}\n\nJoin your consultation:\n${fullMeetingUrl}\n\nPlease join a few minutes before your scheduled time.`;
-  return sendWhatsAppMessage(mobile, body, {
+
+  // templateParams must match the approved tuskmed_appointment_confirmation template:
+  // Hi {{1}}, your appointment with Dr. {{2}} has been confirmed.
+  // 📅 Date: {{3}}
+  // 🕐 Time: {{4}}
+  // 🔗 Join your consultation: {{5}}
+  return sendWhatsAppMessage(mobile, '', {
     userName: patientName || 'Patient',
     campaignName: env.aisensy.apptCampaignName,
-    templateParams: [patientName || 'Patient', `Dr. ${doc}`, dateStr, timeStr, fullMeetingUrl || ''],
+    templateParams: [
+      patientName || 'Patient',  // {{1}} - patient name
+      doc,                        // {{2}} - doctor name (without Dr. prefix)
+      dateStr,                    // {{3}} - formatted date
+      timeStr,                    // {{4}} - formatted time
+      fullMeetingUrl,             // {{5}} - consultation link
+    ],
   });
 }
 
-async function sendAppointmentConfirmation(mobile, { doctorName, start, mode, patientName, meetingUrl }) {
-  if (mode === 'VIDEO' && meetingUrl) {
-    return sendVideoConsultationConfirmed(mobile, { patientName, doctorName, start, meetingUrl });
-  }
-  const dateStr = new Date(start).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-  const timeStr = new Date(start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+async function sendAppointmentConfirmation(mobile, {
+  doctorName,
+  start,
+  mode,
+  patientName,
+  meetingUrl,
+}) {
+  const patient = patientName || 'Patient';
   const doc = cleanDoctorName(doctorName);
-  const body = `Hello ${patientName || 'Patient'},\n\nYour ${mode === 'VIDEO' ? 'video' : 'in-clinic'} appointment with Dr. ${doc} is confirmed for ${dateStr} at ${timeStr}. Open TuskMed > My Appointments for details.`;
-  return sendWhatsAppMessage(mobile, body, {
-    userName: patientName || 'Patient',
-    campaignName: env.aisensy.apptCampaignName,
-    templateParams: [patientName || 'Patient', `Dr. ${doc}`, dateStr, timeStr, mode === 'VIDEO' ? 'Video' : 'In-Clinic'],
+
+  // The approved patient template expects a consultation URL in {{5}}.
+  // Do not send for in-clinic appointments — there is no meeting URL.
+  if (mode !== 'VIDEO' || !meetingUrl) {
+    console.warn(
+      '[whatsapp] Patient confirmation skipped: approved template requires a video consultation URL.'
+    );
+    return {
+      skipped: true,
+      reason: 'Patient template requires a video consultation URL',
+    };
+  }
+
+  return sendVideoConsultationConfirmed(mobile, {
+    patientName: patient,
+    doctorName: doc,
+    start,
+    meetingUrl,
   });
 }
 
 async function sendDoctorAppointmentNotification(mobile, { doctorName, patientName, start, mode, meetingUrl }) {
-  const dateStr = new Date(start).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-  const timeStr = new Date(start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const dateStr = new Date(start).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+  const timeStr = new Date(start).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
   const fullMeetingUrl = formatMeetingUrl(meetingUrl);
   const doc = cleanDoctorName(doctorName);
-  const appointmentInfo = mode === 'VIDEO' ? (fullMeetingUrl || 'Video Consultation Room') : 'In-Clinic Appointment at your clinic';
-  const body = `Hello Dr. ${doc},\n\nYou have a new ${mode === 'VIDEO' ? 'video' : 'in-clinic'} appointment booked with ${patientName || 'Patient'}.\n\nDate: ${dateStr}\nTime: ${timeStr}${mode === 'VIDEO' && fullMeetingUrl ? `\n\nRoom Link:\n${fullMeetingUrl}` : ''}\n\nPlease check your Doctor Portal for full patient details.`;
-  return sendWhatsAppMessage(mobile, body, {
+  const appointmentInfo = mode === 'VIDEO' ? 'Video Consultation' : 'In-Clinic Appointment';
+
+  // templateParams must match the approved tuskmed_doctor_appointment template.
+  // Verify your doctor template variable count in AiSensy matches these 5 params.
+  return sendWhatsAppMessage(mobile, '', {
     userName: `Dr. ${doc}`,
-    campaignName: env.aisensy.doctorApptCampaignName || env.aisensy.apptCampaignName,
-    templateParams: [`Dr. ${doc}`, `${patientName || 'Patient'} (Patient)`, dateStr, timeStr, appointmentInfo],
+    campaignName: env.aisensy.doctorApptCampaignName,
+    templateParams: [
+      `Dr. ${doc}`,             // {{1}} - doctor name
+      patientName || 'Patient', // {{2}} - patient name
+      dateStr,                  // {{3}} - formatted date
+      timeStr,                  // {{4}} - formatted time
+      appointmentInfo,          // {{5}} - Video Consultation or In-Clinic Appointment
+    ],
   });
 }
 
 async function sendReminder(mobile, { doctorName, start }) {
-  return sendWhatsAppMessage(
-    mobile,
-    `Reminder: your appointment with Dr. ${doctorName} is at ${new Date(start).toLocaleString()}. Please join a few minutes early.`
-  );
+  const campaignName = env.aisensy.reminderCampaignName;
+
+  if (!campaignName) {
+    throw new Error(
+      'WhatsApp reminder not sent: AISENSY_REMINDER_CAMPAIGN_NAME is not configured.'
+    );
+  }
+
+  const date = new Date(start);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('WhatsApp reminder not sent: invalid appointment date.');
+  }
+
+  const doctor = String(doctorName || 'Doctor').replace(/^Dr\.?\s*/i, '').trim();
+  const dateStr = date.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  });
+  const timeStr = date.toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+
+  return sendWhatsAppMessage(mobile, '', {
+    campaignName,
+    userName: 'TuskMed Patient',
+    templateParams: [doctor, dateStr, timeStr],
+  });
 }
 
 module.exports = {
@@ -201,7 +292,3 @@ module.exports = {
   sendReminder,
   _outbox: outbox,
 };
-
-
-
-

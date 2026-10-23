@@ -419,7 +419,7 @@ router.post('/appointments/:id/complete', async (req, res, next) => {
     if (appt.videoRoomName) {
       await videoService.endMeeting(appt.videoRoomName).catch(() => {});
     }
-    broadcastConsultationEvent(appt.id, 'consultation:ended', { completed: true, doctorName: doctor.name });
+    broadcastConsultationEvent(appt.id, 'consultation:ended', { completed: true });
     await audit(req.account.id, 'APPOINTMENT_COMPLETED', { appointmentId: appt.id });
     res.json({ appointment: serialize(updated) });
   } catch (err) {
