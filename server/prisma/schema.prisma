@@ -1,0 +1,349 @@
+// TuskMed Teleconsult — Prisma schema
+// PostgreSQL. Run `npm run prisma:migrate` inside /server to apply.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum AppointmentMode {
+  VIDEO
+  IN_CLINIC
+}
+
+enum SlotStatus {
+  AVAILABLE
+  LOCKED
+  BOOKED
+  CANCELLED
+}
+
+enum AppointmentStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum PaymentStatus {
+  CREATED
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+// One account (identified by mobile number) owns many patient profiles.
+// Same table/login path serves patients, doctors and admins - `role` distinguishes them.
+model Account {
+  id               String       @id @default(uuid())
+  mobile           String       @unique
+  role             Role         @default(PATIENT)
+  verified         Boolean      @default(false)
+  acceptedPolicyAt DateTime?
+  activePatientId  String?
+  activePatient    Patient?     @relation("ActivePatient", fields: [activePatientId], references: [id])
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  patients         Patient[]    @relation("AccountPatients")
+  otpSessions      OtpSession[]
+  doctor           Doctor?
+  tickets          Ticket[]
+  queries          Query[]
+  auditLogs        AuditLog[]
+}
+
+// OTP login sessions - no passwords anywhere.
+model OtpSession {
+  id          String   @id @default(uuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id])
+  codeHash    String
+  expiresAt   DateTime
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(5)
+  resendCount Int      @default(0)
+  consumed    Boolean  @default(false)
+  lastSentAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([accountId, consumed])
+}
+
+// A family-member profile. One account -> many patients.
+model Patient {
+  id           String        @id @default(uuid())
+  accountId    String
+  account      Account       @relation("AccountPatients", fields: [accountId], references: [id])
+  name         String
+  mobile       String?
+  email        String?
+  dob          DateTime
+  gender       Gender
+  state        String?
+  city         String?
+  createdAt    DateTime      @default(now())
+
+  activeFor    Account[]     @relation("ActivePatient")
+  appointments Appointment[]
+  queries      Query[]
+
+  @@index([accountId])
+}
+
+model Speciality {
+  id      String   @id @default(uuid())
+  name    String   @unique
+  keywords String[] @default([]) // used for naive symptom -> speciality routing
+  doctors Doctor[]
+}
+
+model Doctor {
+  id             String        @id @default(uuid())
+  accountId      String?       @unique
+  account        Account?      @relation(fields: [accountId], references: [id])
+  specialityId   String
+  speciality     Speciality    @relation(fields: [specialityId], references: [id])
+  name           String        // full display name - kept in sync from the parts below on every profile edit
+  fee            Decimal       @db.Decimal(10, 2) // video consultation fee
+  clinicFee      Decimal       @default(0) @db.Decimal(10, 2) // in-clinic consultation fee (0 = complimentary)
+  rating         Decimal       @default(4.5) @db.Decimal(2, 1)
+  languages      String[]      @default([])
+  experienceYrs  Int           @default(0)
+  registrationNo String?
+  bio            String?
+  photoUrl       String?
+  active         Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+
+  // ---- View Profile (doctor-editable unless noted) ----
+  title          String?       // Dr., Prof., etc.
+  firstName      String?
+  middleName     String?
+  lastName       String?
+  email          String?
+  sex            Gender?
+  dob            DateTime?
+  address        String?
+  clinicLocation String?
+  // Locked fields - admin-only (see admin.js PUT /doctors/:id). Mobile lives
+  // on the linked Account and is never editable at all, by anyone.
+  city           String?
+  state          String?
+
+  slots          Slot[]
+  appointments   Appointment[]
+  blockedPeriods BlockedPeriod[]
+
+  @@index([specialityId])
+}
+
+enum BlockMode {
+  VIDEO
+  IN_CLINIC
+  BOTH
+}
+
+// A doctor-declared range that prevents NEW bookings without touching
+// already-confirmed appointments (see doctors.js slot listing + the
+// booking route in appointments.js, both of which filter against this).
+model BlockedPeriod {
+  id        String    @id @default(uuid())
+  doctorId  String
+  doctor    Doctor    @relation(fields: [doctorId], references: [id])
+  startDate DateTime
+  endDate   DateTime
+  mode      BlockMode
+  createdAt DateTime  @default(now())
+
+  @@index([doctorId, startDate, endDate])
+}
+
+// A slot fills exactly one appointment - enforced by Appointment.slotId being @unique.
+model Slot {
+  id            String          @id @default(uuid())
+  doctorId      String
+  doctor        Doctor          @relation(fields: [doctorId], references: [id])
+  start         DateTime
+  end           DateTime
+  mode          AppointmentMode
+  status        SlotStatus      @default(AVAILABLE)
+  lockedAt      DateTime?
+  lockExpiresAt DateTime?
+  createdAt     DateTime        @default(now())
+
+  appointments Appointment[]
+
+  @@index([doctorId, start, mode, status])
+}
+
+model Appointment {
+  id            String            @id @default(uuid())
+  patientId     String
+  patient       Patient           @relation(fields: [patientId], references: [id])
+  doctorId      String
+  doctor        Doctor            @relation(fields: [doctorId], references: [id])
+  // DB-level: a slot may have many *cancelled* appointment attempts (failed
+  // payments, expired locks) but at most one non-cancelled one - enforced by
+  // a partial unique index (see migration.sql: appointment_active_slot_unique),
+  // since a plain @unique here would permanently burn a slot after its first
+  // failed/expired booking attempt, which would break "released only if
+  // payment fails or times out" -> the slot must be rebookable afterwards.
+  slotId        String
+  slot          Slot              @relation(fields: [slotId], references: [id])
+  mode          AppointmentMode
+  status        AppointmentStatus @default(PENDING_PAYMENT)
+  symptoms      String?
+  category      String?
+  videoRoomName String?
+  videoLink     String?
+  reminderSentAt DateTime?
+  // True when this patient already had an earlier appointment with this
+  // same doctor at booking time - set once, automatically, at creation.
+  isFollowUp    Boolean           @default(false)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  payment      Payment?
+  documents    Document[]
+  report       Report?
+  prescription Prescription?
+  messages     Message[]
+
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([status])
+}
+
+model Payment {
+  id               String        @id @default(uuid())
+  appointmentId    String        @unique
+  appointment      Appointment   @relation(fields: [appointmentId], references: [id])
+  promoId          String?
+  promo            PromoCode?    @relation(fields: [promoId], references: [id])
+  originalAmount   Decimal       @db.Decimal(10, 2)
+  amount           Decimal       @db.Decimal(10, 2)
+  status           PaymentStatus @default(CREATED)
+  gateway          String        @default("razorpay")
+  gatewayOrderId   String?
+  gatewayPaymentId String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+}
+
+model PromoCode {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  discountPct Int
+  expiry      DateTime
+  maxUses     Int?
+  usedCount   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  payments Payment[]
+}
+
+model Report {
+  id            String      @id @default(uuid())
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+  content       String
+  fileUrl       String?
+  createdAt     DateTime    @default(now())
+}
+
+model Prescription {
+  id            String      @id @default(uuid())
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+  medicines     Json
+  notes         String?
+  fileUrl       String?
+  createdAt     DateTime    @default(now())
+}
+
+model Document {
+  id            String      @id @default(uuid())
+  appointmentId String
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+  fileUrl       String
+  fileName      String
+  sizeBytes     Int
+  uploadedAt    DateTime    @default(now())
+}
+
+// Post Query - free text symptom routing (distinct from support tickets)
+model Query {
+  id                  String   @id @default(uuid())
+  accountId           String
+  account             Account  @relation(fields: [accountId], references: [id])
+  patientId           String
+  patient             Patient  @relation(fields: [patientId], references: [id])
+  description         String
+  category            String?
+  attachmentUrl        String?
+  matchedSpecialityId String?
+  status              String   @default("ROUTED")
+  createdAt           DateTime @default(now())
+}
+
+// Help & Support tickets (distinct from clinical Post Query)
+model Ticket {
+  id          String    @id @default(uuid())
+  accountId   String
+  account     Account   @relation(fields: [accountId], references: [id])
+  category    String
+  description String
+  status      String    @default("OPEN")
+  reference   String    @unique
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+}
+
+// Patient <-> doctor chat, scoped to an appointment
+model Message {
+  id            String      @id @default(uuid())
+  appointmentId String
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+  senderRole    Role
+  senderId      String
+  body          String
+  createdAt     DateTime    @default(now())
+
+  @@index([appointmentId, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  accountId String?
+  account   Account? @relation(fields: [accountId], references: [id])
+  action    String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([action, createdAt])
+}
+
+// Admin-configurable platform settings (fees defaults, policies, OTP settings)
+model Config {
+  key   String @id
+  value Json
+}
