@@ -827,7 +827,7 @@ export default function ClinicalWorkspaceDrawer({
             <div className="flex items-center justify-between border-b-2 border-slate-900/10 pb-4">
               <div>
                 <h2 className="text-xl font-extrabold text-slate-900 flex items-center gap-2">
-                  <span className="text-[#CAA067]">TUSKMED</span> CLINICAL TELEMEDICINE
+                  <span className="text-[#CAA067]">TUSKMED</span> TELECONSULT
                 </h2>
                 <p className="text-xs text-slate-500 font-semibold">
                   Consultation Rx Slip &middot; ID: {appointment?.id?.slice(0, 8).toUpperCase() || 'TX-901'}

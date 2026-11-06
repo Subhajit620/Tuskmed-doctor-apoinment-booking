@@ -144,7 +144,7 @@ export default function PrescriptionModal({ isOpen, onClose, appointment, patien
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="text-xl sm:text-2xl font-black font-display tracking-tight text-slate-900">
-                    <span className="text-[#CAA067]">TUSKMED</span> TELEHEALTH
+                    <span className="text-[#CAA067]">TUSKMED</span> TELECONSULT
                   </span>
                   <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase tracking-wide border border-emerald-300">
                     Verified Digital Rx
