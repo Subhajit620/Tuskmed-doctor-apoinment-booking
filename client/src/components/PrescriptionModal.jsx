@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from './motion';
 export default function PrescriptionModal({ isOpen, onClose, appointment, patient, doctor }) {
   const printRef = useRef(null);
 
-  // Close on Escape key
+  // Close on Escape key & sync printable portal on body
   useEffect(() => {
     if (!isOpen) return undefined;
     const handleKeyDown = (e) => {
@@ -15,6 +15,27 @@ export default function PrescriptionModal({ isOpen, onClose, appointment, patien
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
+
+  const syncPrintPortal = () => {
+    if (typeof document === 'undefined' || !printRef.current) return;
+    let portal = document.getElementById('prescription-print-portal');
+    if (!portal) {
+      portal = document.createElement('div');
+      portal.id = 'prescription-print-portal';
+      document.body.appendChild(portal);
+    }
+    portal.innerHTML = `<div class="space-y-6 bg-white text-slate-800 text-xs sm:text-sm">${printRef.current.innerHTML}</div>`;
+  };
+
+  useEffect(() => {
+    if (!isOpen || !appointment) return undefined;
+    const timer = setTimeout(syncPrintPortal, 50);
+    return () => {
+      clearTimeout(timer);
+      const portal = document.getElementById('prescription-print-portal');
+      if (portal) portal.remove();
+    };
+  }, [isOpen, appointment]);
 
   if (!isOpen || !appointment) return null;
 
@@ -35,6 +56,7 @@ export default function PrescriptionModal({ isOpen, onClose, appointment, patien
 
   const handlePrint = (e) => {
     if (e) e.stopPropagation();
+    syncPrintPortal();
     window.print();
   };
 
@@ -116,13 +138,13 @@ export default function PrescriptionModal({ isOpen, onClose, appointment, patien
           </div>
 
           {/* Printable Prescription Body */}
-          <div ref={printRef} className="p-6 sm:p-10 space-y-6 bg-white print:p-8 text-slate-800 text-xs sm:text-sm">
+          <div id="prescription-print-area" ref={printRef} className="p-6 sm:p-10 space-y-6 bg-white print:p-8 text-slate-800 text-xs sm:text-sm">
             {/* 1. Clinic Letterhead */}
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 border-b-2 border-slate-900 pb-5">
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="text-xl sm:text-2xl font-black font-display tracking-tight text-slate-900">
-                    <span className="text-[#CAA067]">TUSTMED</span> TELEHEALTH
+                    <span className="text-[#CAA067]">TUSKMED</span> TELEHEALTH
                   </span>
                   <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold uppercase tracking-wide border border-emerald-300">
                     Verified Digital Rx

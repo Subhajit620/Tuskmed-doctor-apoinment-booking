@@ -9,19 +9,16 @@ import { useLocation } from 'react-router-dom';
  */
 export function PageTransition({ children }) {
   const location = useLocation();
-  const reduced = useReducedMotion();
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    }
+  }, [location.pathname, location.search]);
+
   return (
-    <AnimatePresence mode="wait" initial={false}>
-      <motion.div
-        key={location.pathname}
-        initial={reduced ? false : { opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={reduced ? undefined : { opacity: 0, y: -6 }}
-        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      >
-        {children}
-      </motion.div>
-    </AnimatePresence>
+    <div key={location.pathname} className="w-full">
+      {children}
+    </div>
   );
 }
 
@@ -49,7 +46,7 @@ export function StaggerItem({ children, className }) {
   const reduced = useReducedMotion();
   if (reduced) return <div className={className}>{children}</div>;
   return (
-    <motion.div className={className} variants={itemVariants}>
+    <motion.div className={className} variants={itemVariants} initial="hidden" animate="show">
       {children}
     </motion.div>
   );

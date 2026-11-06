@@ -128,6 +128,15 @@ export default function BookAppointment() {
   const [busy, setBusy] = useState(false);
   const [bookingSuccess, setBookingSuccess] = useState(null);
 
+  // Sync incoming navigation state / query params when navigating to BookAppointment
+  useEffect(() => {
+    setBookingSuccess(null);
+    setStep(1);
+    if (initialSpecialityId) setSpecialityId(initialSpecialityId);
+    if (initialDoctorId) setDoctorId(initialDoctorId);
+    if (initialMode) setMode(initialMode);
+  }, [initialDoctorId, initialSpecialityId, initialMode, location.key]);
+
   // Load specialities
   useEffect(() => {
     api.get('/specialities').then((res) => setSpecialities(res.data.specialities || [])).catch(() => {});
@@ -516,7 +525,6 @@ export default function BookAppointment() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -12 }}
           className="space-y-6"
         >
           {/* Consultation Mode Switcher */}
@@ -890,7 +898,6 @@ export default function BookAppointment() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -12 }}
           className="space-y-6"
         >
           <div className="card space-y-5">
@@ -1001,7 +1008,6 @@ export default function BookAppointment() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -12 }}
           className="space-y-6"
         >
           {/* Appointment Recap Card */}

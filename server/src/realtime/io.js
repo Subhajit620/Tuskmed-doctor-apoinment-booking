@@ -35,15 +35,17 @@ function initIo(server, corsOrigin) {
   ioInstance.use(async (socket, next) => {
     try {
       const token = readCookie(socket.handshake.headers.cookie, env.sessionCookieName);
-      if (!token) throw new Error('No session');
-      const payload = jwt.verify(token, env.jwtSecret);
-      const account = await prisma.account.findUnique({ where: { id: payload.sub } });
-      if (!account) throw new Error('No account');
-      socket.account = account;
-      next();
+      if (token) {
+        const payload = jwt.verify(token, env.jwtSecret);
+        const account = await prisma.account.findUnique({ where: { id: payload.sub } });
+        if (account) {
+          socket.account = account;
+        }
+      }
     } catch {
-      next(new Error('Unauthorized'));
+      // Allow guest/direct-link consultation sockets even if session cookie is missing or expired
     }
+    next();
   });
 
   ioInstance.on('connection', (socket) => {
@@ -56,34 +58,80 @@ function initIo(server, corsOrigin) {
     });
 
     // ---- Video Consultation Room & WebRTC Signaling ----
-    socket.on('consultation:join', ({ appointmentId, role, name }) => {
+    socket.on('consultation:join', async ({ appointmentId, role, name }) => {
       if (!appointmentId) return;
+
+      // Leave previous consultation rooms if switching between multiple appointments
+      if (socket.consultationRooms && Array.isArray(socket.consultationRooms)) {
+        for (const oldRoom of socket.consultationRooms) {
+          socket.leave(oldRoom);
+          socket.to(oldRoom).emit('consultation:peer_left', {
+            socketId: socket.id,
+            senderInfo: socket.consultationInfo,
+          });
+        }
+      }
+
       const roomKey = `consultation:${appointmentId}`;
-      socket.join(roomKey);
+      const roomsToJoin = [roomKey];
+
+      // Also bridge by (doctorId, patientId) pair so if a patient has created multiple
+      // appointments with the same doctor and they click different appointment links,
+      // they still discover each other and connect seamlessly.
+      try {
+        const appt = await prisma.appointment.findUnique({
+          where: { id: String(appointmentId) },
+          select: { id: true, doctorId: true, patientId: true },
+        });
+        if (appt?.doctorId && appt?.patientId) {
+          roomsToJoin.push(`consultation_pair:${appt.doctorId}:${appt.patientId}`);
+        }
+      } catch {
+        // Fallback to appointment roomKey only
+      }
+
+      for (const r of roomsToJoin) {
+        socket.join(r);
+      }
+
+      const effectiveRole = role || socket.account?.role || 'PATIENT';
+      const accountId = socket.account?.id || `guest_${socket.id}`;
       socket.consultationRoom = roomKey;
-      socket.consultationInfo = { role, name, socketId: socket.id, accountId: socket.account.id };
-
-      // Notify others in room that a peer joined
-      socket.to(roomKey).emit('consultation:peer_joined', {
+      socket.consultationRooms = roomsToJoin;
+      socket.consultationInfo = {
+        role: effectiveRole,
+        name: name || (effectiveRole === 'DOCTOR' ? 'Doctor' : 'Patient'),
         socketId: socket.id,
-        role,
-        name,
-        accountId: socket.account.id,
-      });
+        accountId,
+        appointmentId,
+      };
 
-      // Find existing participants in this room to return to caller
-      const room = ioInstance.sockets.adapter.rooms.get(roomKey);
-      const existingPeers = [];
-      if (room) {
-        for (const peerSocketId of room) {
-          if (peerSocketId !== socket.id) {
-            const peerSocket = ioInstance.sockets.sockets.get(peerSocketId);
-            if (peerSocket?.consultationInfo) {
-              existingPeers.push(peerSocket.consultationInfo);
-            }
+      // Gather all unique existing peers across both the appointment room and the doctor-patient pair room
+      const peerMap = new Map();
+      for (const r of roomsToJoin) {
+        const roomSet = ioInstance.sockets.adapter.rooms.get(r);
+        if (!roomSet) continue;
+        for (const peerSocketId of roomSet) {
+          if (peerSocketId === socket.id) continue;
+          const peerSocket = ioInstance.sockets.sockets.get(peerSocketId);
+          if (peerSocket?.consultationInfo) {
+            peerMap.set(peerSocketId, peerSocket.consultationInfo);
           }
         }
       }
+
+      // Notify all discovered peers that this user joined
+      for (const peerSocketId of peerMap.keys()) {
+        ioInstance.to(peerSocketId).emit('consultation:peer_joined', socket.consultationInfo);
+      }
+
+      // Sort peers so opposite role (DOCTOR <-> PATIENT) is always first
+      const existingPeers = Array.from(peerMap.values()).sort((a, b) => {
+        const aOpposite = a.role !== effectiveRole ? 0 : 1;
+        const bOpposite = b.role !== effectiveRole ? 0 : 1;
+        return aOpposite - bOpposite;
+      });
+
       socket.emit('consultation:room_peers', { peers: existingPeers });
     });
 
@@ -94,18 +142,22 @@ function initIo(server, corsOrigin) {
           signal,
           senderInfo: socket.consultationInfo,
         });
-      } else if (appointmentId) {
-        socket.to(`consultation:${appointmentId}`).emit('consultation:signal', {
-          from: socket.id,
-          signal,
-          senderInfo: socket.consultationInfo,
-        });
+      } else {
+        const targetRooms = socket.consultationRooms || (appointmentId ? [`consultation:${appointmentId}`] : []);
+        for (const r of targetRooms) {
+          socket.to(r).emit('consultation:signal', {
+            from: socket.id,
+            signal,
+            senderInfo: socket.consultationInfo,
+          });
+        }
       }
     });
 
     socket.on('consultation:state', ({ appointmentId, state }) => {
-      if (appointmentId) {
-        socket.to(`consultation:${appointmentId}`).emit('consultation:peer_state', {
+      const targetRooms = socket.consultationRooms || (appointmentId ? [`consultation:${appointmentId}`] : []);
+      for (const r of targetRooms) {
+        socket.to(r).emit('consultation:peer_state', {
           from: socket.id,
           state,
           senderInfo: socket.consultationInfo,
@@ -114,8 +166,10 @@ function initIo(server, corsOrigin) {
     });
 
     socket.on('consultation:message', ({ appointmentId, message }) => {
-      if (appointmentId && message) {
-        socket.to(`consultation:${appointmentId}`).emit('consultation:message', {
+      if (!message) return;
+      const targetRooms = socket.consultationRooms || (appointmentId ? [`consultation:${appointmentId}`] : []);
+      for (const r of targetRooms) {
+        socket.to(r).emit('consultation:message', {
           message,
           from: socket.id,
           senderInfo: socket.consultationInfo,
@@ -124,8 +178,10 @@ function initIo(server, corsOrigin) {
     });
 
     socket.on('consultation:vitals_sync', ({ appointmentId, vitals }) => {
-      if (appointmentId && vitals) {
-        socket.to(`consultation:${appointmentId}`).emit('consultation:vitals_update', {
+      if (!vitals) return;
+      const targetRooms = socket.consultationRooms || (appointmentId ? [`consultation:${appointmentId}`] : []);
+      for (const r of targetRooms) {
+        socket.to(r).emit('consultation:vitals_update', {
           vitals,
           updatedAt: new Date().toISOString(),
         });
@@ -133,19 +189,23 @@ function initIo(server, corsOrigin) {
     });
 
     socket.on('consultation:leave', ({ appointmentId }) => {
-      const roomKey = `consultation:${appointmentId}`;
-      socket.leave(roomKey);
-      socket.to(roomKey).emit('consultation:peer_left', {
-        socketId: socket.id,
-        senderInfo: socket.consultationInfo,
-      });
+      const targetRooms = socket.consultationRooms || (appointmentId ? [`consultation:${appointmentId}`] : []);
+      for (const r of targetRooms) {
+        socket.leave(r);
+        socket.to(r).emit('consultation:peer_left', {
+          socketId: socket.id,
+          senderInfo: socket.consultationInfo,
+        });
+      }
       delete socket.consultationRoom;
+      delete socket.consultationRooms;
       delete socket.consultationInfo;
     });
 
     socket.on('disconnect', () => {
-      if (socket.consultationRoom) {
-        socket.to(socket.consultationRoom).emit('consultation:peer_left', {
+      const targetRooms = socket.consultationRooms || (socket.consultationRoom ? [socket.consultationRoom] : []);
+      for (const r of targetRooms) {
+        socket.to(r).emit('consultation:peer_left', {
           socketId: socket.id,
           senderInfo: socket.consultationInfo,
         });
@@ -165,9 +225,20 @@ function broadcastSlotChange(doctorId, slotStart, payload) {
   ioInstance.to(`doctor:${doctorId}:${dateKey(slotStart)}`).emit('slot:update', payload);
 }
 
-function broadcastConsultationEvent(appointmentId, event, payload) {
-  if (!ioInstance) return;
+async function broadcastConsultationEvent(appointmentId, event, payload) {
+  if (!ioInstance || !appointmentId) return;
   ioInstance.to(`consultation:${appointmentId}`).emit(event, payload);
+  try {
+    const appt = await prisma.appointment.findUnique({
+      where: { id: String(appointmentId) },
+      select: { doctorId: true, patientId: true },
+    });
+    if (appt?.doctorId && appt?.patientId) {
+      ioInstance.to(`consultation_pair:${appt.doctorId}:${appt.patientId}`).emit(event, payload);
+    }
+  } catch {
+    // ignore lookup error
+  }
 }
 
 module.exports = { initIo, broadcastSlotChange, broadcastConsultationEvent };

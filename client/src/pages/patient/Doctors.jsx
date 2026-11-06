@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import api from '../../api/client';
 import { Skeleton, StaggerGrid, StaggerItem } from '../../components/motion';
 
@@ -11,10 +11,23 @@ export default function Doctors() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
-    api.get('/specialities').then((res) => setSpecialities(res.data.specialities));
-  }, []);
+    const params = new URLSearchParams(location.search);
+    const reqSpecName = params.get('speciality');
+    const reqSpecId = params.get('specialityId');
+    api.get('/specialities').then((res) => {
+      const list = res.data.specialities || [];
+      setSpecialities(list);
+      if (reqSpecId) {
+        setSpecialityId(reqSpecId);
+      } else if (reqSpecName) {
+        const match = list.find((s) => s.name.toLowerCase() === reqSpecName.toLowerCase());
+        if (match) setSpecialityId(match.id);
+      }
+    });
+  }, [location.search]);
 
   useEffect(() => {
     setLoading(true);
@@ -87,8 +100,14 @@ export default function Doctors() {
                     : 'No upcoming availability'}
                 </div>
                 <button
-                  className="btn-primary mt-2"
-                  onClick={() => navigate('/patient/book', { state: { doctorId: d.id, specialityId: d.specialityId } })}
+                  type="button"
+                  className="btn-primary mt-2 cursor-pointer"
+                  onClick={() =>
+                    navigate(
+                      `/patient/book?doctorId=${encodeURIComponent(d.id)}${d.specialityId ? `&specialityId=${encodeURIComponent(d.specialityId)}` : ''}`,
+                      { state: { doctorId: d.id, specialityId: d.specialityId } }
+                    )
+                  }
                 >
                   Book Appointment
                 </button>

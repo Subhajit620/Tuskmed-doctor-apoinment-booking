@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from '../../components/motion';
 import { ToastProvider } from '../../components/Toast';
 import { ConfirmProvider } from '../../components/ConfirmDialog';
 import DoctorsPanel from './panels/DoctorsPanel';
+import PatientsAndBookingPanel from './panels/PatientsAndBookingPanel';
 import SlotsPanel from './panels/SlotsPanel';
 import AppointmentsPanel from './panels/AppointmentsPanel';
 import PrescriptionsPanel from './panels/PrescriptionsPanel';
@@ -13,6 +14,7 @@ import ConfigPanel from './panels/ConfigPanel';
 
 const ICONS = {
   doctors: 'M17 20v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M15 3.5a3 3 0 1 1 0 6M9 8.5a3 3 0 1 0 0-6M22 20v-1a3.5 3.5 0 0 0-2.5-3.35',
+  patients: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM19 8v6M22 11h-6',
   slots: 'M7 3v3M17 3v3M4 8h16M5 6h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z',
   appointments: 'M12 8v5l3 2M4 12a8 8 0 1 1 3.05 6.29M4 12v5m0-5H2m2 5 3.5-1',
   prescriptions: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
@@ -31,6 +33,7 @@ function Icon({ path, className = 'h-[18px] w-[18px]' }) {
 }
 
 const TABS = [
+  { key: 'patients', label: 'Patients & Book', icon: ICONS.patients, Component: PatientsAndBookingPanel },
   { key: 'doctors', label: 'Doctors', icon: ICONS.doctors, Component: DoctorsPanel },
   { key: 'slots', label: 'Slots', icon: ICONS.slots, Component: SlotsPanel },
   { key: 'appointments', label: 'Appointments', icon: ICONS.appointments, Component: AppointmentsPanel },
@@ -42,7 +45,7 @@ const TABS = [
 ];
 
 export default function AdminDashboard() {
-  const [tab, setTab] = useState('doctors');
+  const [tab, setTab] = useState('patients');
   const active = TABS.find((t) => t.key === tab);
   const Active = active?.Component;
 
@@ -94,18 +97,10 @@ export default function AdminDashboard() {
         </nav>
       </motion.aside>
 
-      <div className="min-w-0">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={tab}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-          >
-            {Active && <Active />}
-          </motion.div>
-        </AnimatePresence>
+      <div className="min-w-0 w-full">
+        <div key={tab} className="w-full">
+          {Active && <Active />}
+        </div>
       </div>
     </div>
     </ConfirmProvider>

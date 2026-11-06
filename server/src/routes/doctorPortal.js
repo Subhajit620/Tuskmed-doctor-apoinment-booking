@@ -204,6 +204,7 @@ router.get('/appointments', async (req, res, next) => {
       range = { gte: now, lte: endOfDay(new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000)) };
     } else if (scope === 'upcoming') {
       range = { gte: new Date(now.getTime() - 2 * 60 * 60 * 1000) };
+      statusFilter = 'CONFIRMED';
     } else if (scope === 'past') {
       range = { lt: new Date(now.getTime() - 2 * 60 * 60 * 1000) };
     } else if (scope === 'requests') {
@@ -222,6 +223,23 @@ router.get('/appointments', async (req, res, next) => {
       include: DETAIL_INCLUDE,
       orderBy: { slot: { start: (scope === 'past' || scope === 'prescriptions') ? 'desc' : 'asc' } },
     });
+
+    // When fetching 'upcoming' (used by Doctor Dashboard "Next Up · Join Call" card),
+    // prioritize the appointment slot closest to current time (`now`) so an older uncompleted
+    // appointment from 1-2 hours ago never shadows a newly booked active appointment.
+    if (scope === 'upcoming' && appts.length > 1) {
+      const nowMs = now.getTime();
+      appts.sort((a, b) => {
+        const aStart = new Date(a.slot?.start || a.createdAt).getTime();
+        const bStart = new Date(b.slot?.start || b.createdAt).getTime();
+        const aInWindow = aStart >= nowMs - 30 * 60 * 1000 && aStart <= nowMs + 60 * 60 * 1000;
+        const bInWindow = bStart >= nowMs - 30 * 60 * 1000 && bStart <= nowMs + 60 * 60 * 1000;
+        if (aInWindow && !bInWindow) return -1;
+        if (!aInWindow && bInWindow) return 1;
+        return Math.abs(aStart - nowMs) - Math.abs(bStart - nowMs);
+      });
+    }
+
     res.json({ appointments: appts.map(serialize) });
   } catch (err) {
     next(err);
@@ -276,9 +294,11 @@ router.get('/appointments/past', async (req, res, next) => {
 });
 
 async function loadOwnAppointment(req) {
-  const doctor = await currentDoctor(req);
   const appt = await prisma.appointment.findUnique({ where: { id: req.params.id }, include: DETAIL_INCLUDE });
-  if (!appt || appt.doctorId !== doctor.id) throw new ApiError(404, 'Appointment not found', 'NOT_FOUND');
+  if (!appt) throw new ApiError(404, 'Appointment not found', 'NOT_FOUND');
+  if (req.account?.role === 'ADMIN') return appt;
+  const doctor = await currentDoctor(req);
+  if (appt.doctorId !== doctor.id) throw new ApiError(404, 'Appointment not found', 'NOT_FOUND');
   return appt;
 }
 

@@ -30,7 +30,15 @@ export default function MessageBox() {
     api
       .get('/appointments/mine')
       .then((res) => {
-        const list = res.data.appointments || [];
+        const list = (res.data.appointments || []).slice().sort((a, b) => {
+          const nowMs = Date.now();
+          const aConfirmed = a.status === 'CONFIRMED' ? 0 : 1;
+          const bConfirmed = b.status === 'CONFIRMED' ? 0 : 1;
+          if (aConfirmed !== bConfirmed) return aConfirmed - bConfirmed;
+          const aStart = new Date(a.slot?.start || a.createdAt).getTime();
+          const bStart = new Date(b.slot?.start || b.createdAt).getTime();
+          return Math.abs(aStart - nowMs) - Math.abs(bStart - nowMs);
+        });
         setAppointments(list);
         if (!selectedApptId && list.length > 0) {
           setSelectedApptId(list[0].id);
@@ -231,7 +239,8 @@ export default function MessageBox() {
                           {appt.doctor?.name}
                         </h3>
                         <span className="text-[11px] font-semibold text-[#8B9EA8] shrink-0">
-                          {startDate.toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                          {startDate.toLocaleDateString([], { month: 'short', day: 'numeric' })} &middot;{' '}
+                          {startDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
                       </div>
                       <p className="text-[12px] text-[#CAA067] font-semibold truncate mt-0.5">

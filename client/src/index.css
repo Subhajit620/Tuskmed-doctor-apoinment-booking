@@ -169,19 +169,58 @@ h1, h2, h3, h4 {
   transform-origin: center center;
 }
 
-/* Printable prescription: hide everything except the marked print area,
- * used by the doctor's "Print prescription" button. */
+/* Printable prescription portal: hidden on screen, rendered cleanly at body root during print */
+#prescription-print-portal {
+  display: none;
+}
+
 @media print {
-  body * {
-    visibility: hidden;
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
   }
-  #prescription-print-area,
-  #prescription-print-area * {
-    visibility: visible;
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
-  #prescription-print-area {
-    position: absolute;
-    inset: 0;
-    width: 100%;
+
+  body > *:not(#prescription-print-portal) {
+    display: none !important;
+  }
+
+  #prescription-print-portal {
+    display: block !important;
+    visibility: visible !important;
+    position: static !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 12px !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+    overflow: visible !important;
+  }
+
+  #prescription-print-portal * {
+    visibility: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  #prescription-print-portal .print\:hidden {
+    display: none !important;
+  }
+
+  #prescription-print-portal .overflow-x-auto {
+    overflow: visible !important;
   }
 }

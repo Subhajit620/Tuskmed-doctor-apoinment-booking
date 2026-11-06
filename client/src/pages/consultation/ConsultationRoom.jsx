@@ -56,7 +56,8 @@ export default function ConsultationRoom() {
   const screenVideoRef = useRef(null);
   const containerRef = useRef(null);
 
-  const isDoctor = account?.role === 'DOCTOR' || urlRole === 'DOCTOR';
+  const isDoctor = account?.role === 'DOCTOR' || urlRole === 'DOCTOR' || (account?.role === 'ADMIN' && urlRole !== 'PATIENT');
+  const dashboardPath = account?.role === 'ADMIN' ? '/admin' : isDoctor ? '/doctor' : '/patient';
   const currentUser = {
     role: isDoctor ? 'DOCTOR' : 'PATIENT',
     name: isDoctor
@@ -240,7 +241,9 @@ export default function ConsultationRoom() {
 
   // Leave Call
   const handleLeave = () => {
-    if (isDoctor) {
+    if (account?.role === 'ADMIN') {
+      navigate('/admin');
+    } else if (isDoctor) {
       navigate('/doctor');
     } else {
       navigate('/patient/appointments');
@@ -923,7 +926,7 @@ export default function ConsultationRoom() {
           appointment={appointment}
           role={isDoctor ? 'DOCTOR' : 'PATIENT'}
           callDuration={callDuration}
-          onClose={() => navigate(isDoctor ? '/doctor' : '/patient/past-records')}
+          onClose={() => navigate(account?.role === 'ADMIN' ? '/admin' : isDoctor ? '/doctor' : '/patient/past-records')}
         />
       )}
     </div>

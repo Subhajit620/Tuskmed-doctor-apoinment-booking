@@ -43,10 +43,10 @@ export default function AppointmentsPanel() {
   };
 
   const removeOne = async (a) => {
-    const when = new Date(a.slot.start).toLocaleString();
+    const when = new Date(a.slot?.start || a.createdAt).toLocaleString();
     const ok = await confirm({
       title: 'Permanently delete this appointment?',
-      message: `${a.patient.name} with ${a.doctor.name} — ${when}\n\nThis also removes its report, prescription, documents and chat history. This cannot be undone.`,
+      message: `${a.patient?.name || 'Patient'} with ${a.doctor?.name || 'Doctor'} — ${when}\n\nThis also removes its report, prescription, documents and chat history. This cannot be undone.`,
       confirmLabel: 'Delete permanently',
       danger: true,
     });
@@ -179,6 +179,8 @@ export default function AppointmentsPanel() {
         isOpen={!!selectedPrescription}
         onClose={() => setSelectedPrescription(null)}
         appointment={selectedPrescription}
+        doctor={selectedPrescription?.doctor}
+        patient={selectedPrescription?.patient}
       />
     </div>
   );

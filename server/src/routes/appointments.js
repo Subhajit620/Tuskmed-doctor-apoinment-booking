@@ -434,8 +434,8 @@ router.get('/mine', requireAuth, requireRole('PATIENT'), async (req, res, next) 
     const endOfToday = new Date(now);
     endOfToday.setHours(23, 59, 59, 999);
 
-    // Build patient filter: scoped to active patient (or explicit patientId), unless patientId is 'all'
-    const targetPatientId = patientId === 'all' ? null : (patientId || req.account.activePatientId);
+    // Build patient filter: if explicit patientId is passed (and not 'all'), filter by it; otherwise show all appointments for this account
+    const targetPatientId = patientId && patientId !== 'all' ? String(patientId) : null;
     const patientFilter = targetPatientId
       ? { patientId: targetPatientId, patient: { accountId: req.account.id } }
       : { patient: { accountId: req.account.id } };
@@ -477,6 +477,20 @@ router.get('/mine', requireAuth, requireRole('PATIENT'), async (req, res, next) 
       include: DETAIL_INCLUDE,
       orderBy: { slot: { start: scope === 'past' ? 'desc' : 'asc' } },
     });
+
+    if (scope === 'upcoming' && appts.length > 1) {
+      const nowMs = now.getTime();
+      appts.sort((a, b) => {
+        const aStart = new Date(a.slot?.start || a.createdAt).getTime();
+        const bStart = new Date(b.slot?.start || b.createdAt).getTime();
+        const aInWindow = aStart >= nowMs - 30 * 60 * 1000 && aStart <= nowMs + 60 * 60 * 1000;
+        const bInWindow = bStart >= nowMs - 30 * 60 * 1000 && bStart <= nowMs + 60 * 60 * 1000;
+        if (aInWindow && !bInWindow) return -1;
+        if (!aInWindow && bInWindow) return 1;
+        return Math.abs(aStart - nowMs) - Math.abs(bStart - nowMs);
+      });
+    }
+
     res.json({ appointments: appts.map(serialize) });
   } catch (err) {
     next(err);

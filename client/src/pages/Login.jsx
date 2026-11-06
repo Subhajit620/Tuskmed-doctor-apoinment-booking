@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from '../components/motion';
 import TuskMedWordmark from '../components/TuskMedWordmark';
 
 export default function Login() {
-  const [mobile, setMobile] = useState('8101421053');
+  const [mobile, setMobile] = useState('');
   const [otpId, setOtpId] = useState(null);
   const [code, setCode] = useState('');
   const [devCode, setDevCode] = useState(null);
@@ -320,7 +320,7 @@ export default function Login() {
                       <input
                         type="tel"
                         className="flex-1 bg-transparent px-3.5 py-2.5 text-[15px] font-bold text-[#2B434C] focus:outline-none placeholder:text-slate-400 placeholder:font-normal"
-                        placeholder="8101421053"
+                        placeholder="Enter 10-digit mobile number"
                         value={mobile}
                         onChange={(e) => setMobile(e.target.value.replace(/[^\d]/g, ''))}
                         required

@@ -3,12 +3,19 @@ const prisma = require('../db/prisma');
 const env = require('../config/env');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { refundPayment } = require('../integrations/payment');
-const { broadcastSlotChange } = require('../realtime/io');
+const { broadcastSlotChange, getIo } = require('../realtime/io');
 const { audit } = require('../utils/audit');
 const { ApiError } = require('../utils/errors');
 const { computeAge } = require('../utils/age');
 const { serialize } = require('./appointments');
 const { normalizeMobile, isValidMobile } = require('../utils/mobile');
+const { createRoom } = require('../integrations/video');
+const {
+  sendAppointmentConfirmation,
+  sendDoctorAppointmentNotification,
+  formatMeetingUrl,
+} = require('../integrations/whatsapp');
+const { ensureBookingConfirmationMessages } = require('../utils/appointmentMessages');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('ADMIN'));
@@ -266,6 +273,547 @@ router.delete('/slots/:id', async (req, res, next) => {
     if (slot.status !== 'AVAILABLE') throw new ApiError(400, 'Only available slots can be removed', 'SLOT_NOT_AVAILABLE');
     await prisma.slot.update({ where: { id: slot.id }, data: { status: 'CANCELLED' } });
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---- Patients & Admin Booking ----
+async function createOrFindPatientByAdmin(payload, adminAccountId) {
+  const { name, mobile: rawMobile, email, dob, age, gender = 'MALE', city, state } = payload || {};
+  if (!name || !String(name).trim()) {
+    throw new ApiError(400, 'Patient name is required', 'MISSING_NAME');
+  }
+  if (!rawMobile || !isValidMobile(rawMobile)) {
+    throw new ApiError(400, 'A valid 10-digit mobile number is required for the patient', 'INVALID_MOBILE');
+  }
+  const mobile = normalizeMobile(rawMobile);
+  const validGender = ['MALE', 'FEMALE', 'OTHER'].includes(String(gender).toUpperCase())
+    ? String(gender).toUpperCase()
+    : 'MALE';
+
+  let dobDate;
+  if (dob) {
+    dobDate = new Date(dob);
+  } else if (age !== undefined && age !== '' && !Number.isNaN(Number(age))) {
+    const years = Math.max(0, Math.min(120, parseInt(age, 10)));
+    const now = new Date();
+    dobDate = new Date(now.getFullYear() - years, now.getMonth(), now.getDate());
+  } else {
+    // Default to 30 years old if neither DOB nor age was provided
+    const now = new Date();
+    dobDate = new Date(now.getFullYear() - 30, 0, 1);
+  }
+  if (Number.isNaN(dobDate.getTime())) {
+    throw new ApiError(400, 'Invalid date of birth', 'INVALID_DOB');
+  }
+
+  let account = await prisma.account.findUnique({ where: { mobile } });
+  if (!account) {
+    account = await prisma.account.create({
+      data: {
+        mobile,
+        role: 'PATIENT',
+        verified: true,
+        acceptedPolicyAt: new Date(),
+      },
+    });
+  } else if (!account.verified || !account.acceptedPolicyAt) {
+    account = await prisma.account.update({
+      where: { id: account.id },
+      data: {
+        verified: true,
+        acceptedPolicyAt: account.acceptedPolicyAt || new Date(),
+      },
+    });
+  }
+
+  // If the account already has a default "My Profile" placeholder or matching name, update it; otherwise create new
+  const existingPatients = await prisma.patient.findMany({
+    where: { accountId: account.id },
+    orderBy: { createdAt: 'asc' },
+  });
+  const placeholderOrMatch = existingPatients.find(
+    (p) =>
+      p.name === 'My Profile' ||
+      p.name.trim().toLowerCase() === String(name).trim().toLowerCase()
+  );
+
+  let patient;
+  if (placeholderOrMatch) {
+    patient = await prisma.patient.update({
+      where: { id: placeholderOrMatch.id },
+      data: {
+        name: String(name).trim(),
+        mobile,
+        email: email ? String(email).trim() : placeholderOrMatch.email,
+        dob: dobDate,
+        gender: validGender,
+        city: city ? String(city).trim() : placeholderOrMatch.city,
+        state: state ? String(state).trim() : placeholderOrMatch.state,
+      },
+    });
+  } else {
+    patient = await prisma.patient.create({
+      data: {
+        accountId: account.id,
+        name: String(name).trim(),
+        mobile,
+        email: email ? String(email).trim() : null,
+        dob: dobDate,
+        gender: validGender,
+        city: city ? String(city).trim() : null,
+        state: state ? String(state).trim() : null,
+      },
+    });
+  }
+
+  // Always set this registered patient as the account's activePatientId so their dashboard shows it immediately
+  await prisma.account.update({
+    where: { id: account.id },
+    data: {
+      activePatientId: patient.id,
+      verified: true,
+      acceptedPolicyAt: account.acceptedPolicyAt || new Date(),
+    },
+  });
+
+  try {
+    const io = getIo();
+    if (io) {
+      io.to(`account:${account.id}`).emit('patient:profile-updated', {
+        patientId: patient.id,
+        accountId: account.id,
+      });
+    }
+  } catch (sockErr) {
+    // non-fatal
+  }
+
+  await audit(adminAccountId, 'ADMIN_PATIENT_CREATED', { patientId: patient.id, mobile, city });
+  return patient;
+}
+
+router.get('/patients', async (req, res, next) => {
+  try {
+    const { q } = req.query;
+    const where = q
+      ? {
+          OR: [
+            { name: { contains: String(q), mode: 'insensitive' } },
+            { mobile: { contains: String(q) } },
+            { account: { mobile: { contains: String(q) } } },
+          ],
+        }
+      : {};
+
+    const patients = await prisma.patient.findMany({
+      where,
+      include: {
+        account: { select: { id: true, mobile: true, role: true } },
+        _count: { select: { appointments: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+
+    res.json({
+      patients: patients.map((p) => ({
+        id: p.id,
+        accountId: p.accountId,
+        name: p.name,
+        mobile: p.mobile || p.account?.mobile || '',
+        email: p.email,
+        dob: p.dob,
+        age: computeAge(p.dob),
+        gender: p.gender,
+        city: p.city,
+        state: p.state,
+        createdAt: p.createdAt,
+        appointmentsCount: p._count?.appointments || 0,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/patients', async (req, res, next) => {
+  try {
+    const patient = await createOrFindPatientByAdmin(req.body, req.account.id);
+    res.status(201).json({
+      patient: {
+        ...patient,
+        age: computeAge(patient.dob),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put('/patients/:id', async (req, res, next) => {
+  try {
+    const existing = await prisma.patient.findUnique({
+      where: { id: req.params.id },
+      include: { account: true },
+    });
+    if (!existing) {
+      throw new ApiError(404, 'Patient not found', 'PATIENT_NOT_FOUND');
+    }
+
+    const { name, mobile: rawMobile, email, dob, age, gender, city, state } = req.body || {};
+    const data = {};
+
+    if (name !== undefined && String(name).trim()) {
+      data.name = String(name).trim();
+    }
+    if (email !== undefined) {
+      data.email = email ? String(email).trim() : null;
+    }
+    if (city !== undefined) {
+      data.city = city ? String(city).trim() : null;
+    }
+    if (state !== undefined) {
+      data.state = state ? String(state).trim() : null;
+    }
+    if (gender !== undefined && ['MALE', 'FEMALE', 'OTHER'].includes(String(gender).toUpperCase())) {
+      data.gender = String(gender).toUpperCase();
+    }
+    if (dob) {
+      data.dob = new Date(dob);
+    } else if (age !== undefined && age !== '' && !Number.isNaN(Number(age))) {
+      const years = Math.max(0, Math.min(120, parseInt(age, 10)));
+      const now = new Date();
+      data.dob = new Date(now.getFullYear() - years, now.getMonth(), now.getDate());
+    }
+
+    let targetAccountId = existing.accountId;
+    if (rawMobile !== undefined && String(rawMobile).trim()) {
+      if (!isValidMobile(rawMobile)) {
+        throw new ApiError(400, 'Please provide a valid 10-digit mobile number', 'INVALID_MOBILE');
+      }
+      const mobile = normalizeMobile(rawMobile);
+      data.mobile = mobile;
+
+      if (existing.account?.mobile !== mobile) {
+        const otherAccount = await prisma.account.findUnique({ where: { mobile } });
+        if (otherAccount) {
+          targetAccountId = otherAccount.id;
+          data.accountId = otherAccount.id;
+        } else if (existing.account && existing.account.role === 'PATIENT') {
+          await prisma.account.update({
+            where: { id: existing.account.id },
+            data: { mobile, verified: true, acceptedPolicyAt: existing.account.acceptedPolicyAt || new Date() },
+          });
+        }
+      }
+    }
+
+    const updated = await prisma.patient.update({
+      where: { id: existing.id },
+      data,
+    });
+
+    if (targetAccountId) {
+      await prisma.account.update({
+        where: { id: targetAccountId },
+        data: { activePatientId: updated.id, verified: true },
+      }).catch(() => {});
+
+      try {
+        const io = getIo();
+        if (io) {
+          io.to(`account:${targetAccountId}`).emit('patient:profile-updated', {
+            patientId: updated.id,
+            accountId: targetAccountId,
+          });
+        }
+      } catch {}
+    }
+
+    await audit(req.account.id, 'ADMIN_PATIENT_UPDATED', { patientId: updated.id });
+    res.json({
+      patient: {
+        ...updated,
+        age: computeAge(updated.dob),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/patients/:id', async (req, res, next) => {
+  try {
+    const existing = await prisma.patient.findUnique({
+      where: { id: req.params.id },
+      include: { appointments: true, account: true },
+    });
+    if (!existing) {
+      throw new ApiError(404, 'Patient not found', 'PATIENT_NOT_FOUND');
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.account.updateMany({
+        where: { activePatientId: existing.id },
+        data: { activePatientId: null },
+      });
+      await tx.query.deleteMany({ where: { patientId: existing.id } });
+
+      const apptIds = existing.appointments.map((a) => a.id);
+      const slotIds = existing.appointments.map((a) => a.slotId).filter(Boolean);
+      if (apptIds.length > 0) {
+        await tx.document.deleteMany({ where: { appointmentId: { in: apptIds } } });
+        await tx.report.deleteMany({ where: { appointmentId: { in: apptIds } } });
+        await tx.prescription.deleteMany({ where: { appointmentId: { in: apptIds } } });
+        await tx.message.deleteMany({ where: { appointmentId: { in: apptIds } } });
+        await tx.payment.deleteMany({ where: { appointmentId: { in: apptIds } } });
+        await tx.appointment.deleteMany({ where: { id: { in: apptIds } } });
+      }
+      if (slotIds.length > 0) {
+        await tx.slot.updateMany({
+          where: { id: { in: slotIds }, status: 'BOOKED' },
+          data: { status: 'AVAILABLE', lockedAt: null, lockExpiresAt: null },
+        });
+      }
+
+      await tx.patient.delete({ where: { id: existing.id } });
+
+      if (existing.accountId) {
+        const remaining = await tx.patient.findMany({
+          where: { accountId: existing.accountId },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (remaining.length > 0) {
+          await tx.account.update({
+            where: { id: existing.accountId },
+            data: { activePatientId: remaining[0].id },
+          });
+        } else if (existing.account?.role === 'PATIENT') {
+          await tx.otpSession.deleteMany({ where: { accountId: existing.accountId } });
+          await tx.ticket.deleteMany({ where: { accountId: existing.accountId } });
+          await tx.query.deleteMany({ where: { accountId: existing.accountId } });
+          await tx.auditLog.updateMany({ where: { accountId: existing.accountId }, data: { accountId: null } });
+          await tx.account.delete({ where: { id: existing.accountId } });
+        }
+      }
+    });
+
+    await audit(req.account.id, 'ADMIN_PATIENT_DELETED', {
+      patientId: existing.id,
+      name: existing.name,
+      mobile: existing.mobile,
+    });
+    res.json({ ok: true, message: 'Patient deleted successfully.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/appointments/book', async (req, res, next) => {
+  try {
+    const {
+      patientId,
+      newPatient,
+      doctorId,
+      slotId,
+      instantNow,
+      mode = 'VIDEO',
+      symptoms,
+      category,
+    } = req.body || {};
+
+    if (!doctorId) {
+      throw new ApiError(400, 'doctorId is required', 'MISSING_DOCTOR');
+    }
+    if (!['VIDEO', 'IN_CLINIC'].includes(mode)) {
+      throw new ApiError(400, 'Invalid consultation mode', 'INVALID_MODE');
+    }
+
+    const doctor = await prisma.doctor.findUnique({
+      where: { id: String(doctorId) },
+      include: { speciality: true, account: true },
+    });
+    if (!doctor) {
+      throw new ApiError(404, 'Doctor not found', 'DOCTOR_NOT_FOUND');
+    }
+
+    // 1. Resolve Patient (existing patientId or create inline newPatient)
+    let patient = null;
+    if (patientId) {
+      patient = await prisma.patient.findUnique({
+        where: { id: String(patientId) },
+        include: { account: true },
+      });
+      if (!patient) throw new ApiError(404, 'Selected patient not found', 'PATIENT_NOT_FOUND');
+    } else if (newPatient && newPatient.name) {
+      patient = await createOrFindPatientByAdmin(newPatient, req.account.id);
+    } else {
+      throw new ApiError(400, 'Please select an existing patient or provide new patient details', 'MISSING_PATIENT');
+    }
+
+    // 2. Resolve or Create Slot (either scheduled slotId or instantNow slot)
+    let slot = null;
+    if (instantNow) {
+      const start = new Date();
+      const end = new Date(start.getTime() + 30 * 60 * 1000);
+      slot = await prisma.slot.create({
+        data: {
+          doctorId: doctor.id,
+          start,
+          end,
+          mode,
+          status: 'BOOKED',
+        },
+      });
+    } else if (slotId) {
+      slot = await prisma.slot.findUnique({ where: { id: String(slotId) } });
+      if (!slot || slot.doctorId !== doctor.id) {
+        throw new ApiError(404, 'Selected slot not found for this doctor', 'SLOT_NOT_FOUND');
+      }
+      if (slot.status !== 'AVAILABLE') {
+        throw new ApiError(409, 'This slot is already booked. Please choose another slot or use Instant Consultation.', 'SLOT_UNAVAILABLE');
+      }
+      slot = await prisma.slot.update({
+        where: { id: slot.id },
+        data: { status: 'BOOKED', lockedAt: null, lockExpiresAt: null },
+      });
+    } else {
+      throw new ApiError(400, 'Please select a time slot or choose Instant Consultation Now', 'MISSING_SLOT');
+    }
+
+    // 3. Create Confirmed Appointment
+    const priorVisit = await prisma.appointment.findFirst({
+      where: { patientId: patient.id, doctorId: doctor.id, status: { not: 'CANCELLED' } },
+    });
+
+    let appointment = await prisma.appointment.create({
+      data: {
+        patientId: patient.id,
+        doctorId: doctor.id,
+        slotId: slot.id,
+        mode,
+        status: 'CONFIRMED',
+        symptoms: symptoms ? String(symptoms).trim() : 'Booked by Admin',
+        category: category || doctor.speciality?.name || null,
+        isFollowUp: !!priorVisit,
+      },
+    });
+
+    // 4. Record Payment (Admin / Complimentary / Collected)
+    const feeAmount = mode === 'VIDEO' ? Number(doctor.fee || 0) : Number(doctor.clinicFee || 0);
+    await prisma.payment.upsert({
+      where: { appointmentId: appointment.id },
+      create: {
+        appointmentId: appointment.id,
+        originalAmount: feeAmount,
+        amount: feeAmount,
+        status: 'SUCCESS',
+        gateway: 'admin',
+        gatewayPaymentId: `admin_${Date.now()}`,
+      },
+      update: {
+        status: 'SUCCESS',
+      },
+    });
+
+    // 5. Create Video Room if VIDEO mode
+    let videoLink = null;
+    if (mode === 'VIDEO') {
+      try {
+        const room = await createRoom(appointment.id, slot.start);
+        videoLink = room?.url || `/consultation/${appointment.id}`;
+        appointment = await prisma.appointment.update({
+          where: { id: appointment.id },
+          data: {
+            videoLink,
+            videoRoomName: room?.name || room?.meetingId || `tuskmed-${appointment.id.slice(0, 8)}`,
+          },
+        });
+      } catch {
+        videoLink = `/consultation/${appointment.id}`;
+        appointment = await prisma.appointment.update({
+          where: { id: appointment.id },
+          data: {
+            videoLink,
+            videoRoomName: `tuskmed-${appointment.id.slice(0, 8)}`,
+          },
+        });
+      }
+    }
+
+    const fullAppt = await prisma.appointment.findUnique({
+      where: { id: appointment.id },
+      include: {
+        doctor: { include: { speciality: true } },
+        slot: true,
+        patient: { include: { account: true } },
+        payment: { include: { promo: true } },
+        prescription: true,
+        report: true,
+        documents: true,
+      },
+    });
+
+    // 6. Send In-App Message Box & WhatsApp Notifications to Patient and Doctor
+    try {
+      await ensureBookingConfirmationMessages({
+        appointmentId: fullAppt.id,
+        doctorName: doctor.name,
+        patientName: patient.name,
+        start: slot.start,
+        mode,
+        meetingUrl: fullAppt.videoLink,
+      });
+    } catch (msgErr) {
+      console.warn('[admin book] message box error:', msgErr.message);
+    }
+
+    try {
+      const patientMobile = patient.mobile || fullAppt.patient?.account?.mobile;
+      if (patientMobile) {
+        await sendAppointmentConfirmation(patientMobile, {
+          appointmentId: fullAppt.id,
+          doctorName: doctor.name,
+          start: slot.start,
+          mode,
+          patientName: patient.name,
+          meetingUrl: fullAppt.videoLink,
+        });
+      }
+      if (doctor.account?.mobile) {
+        await sendDoctorAppointmentNotification(doctor.account.mobile, {
+          appointmentId: fullAppt.id,
+          doctorName: doctor.name,
+          patientName: patient.name,
+          start: slot.start,
+          mode,
+          meetingUrl: fullAppt.videoLink,
+        });
+      }
+    } catch (notifErr) {
+      console.warn('[admin book] whatsapp notification error:', notifErr.message);
+    }
+
+    broadcastSlotChange(doctor.id, slot.start, { slotId: slot.id, status: 'BOOKED' });
+    await audit(req.account.id, 'ADMIN_APPOINTMENT_BOOKED', {
+      appointmentId: fullAppt.id,
+      patientId: patient.id,
+      doctorId: doctor.id,
+      mode,
+    });
+
+    const patientJoinUrl = mode === 'VIDEO' ? formatMeetingUrl(fullAppt.videoLink, fullAppt.id) : null;
+    const doctorJoinUrl = patientJoinUrl
+      ? `${patientJoinUrl}${patientJoinUrl.includes('?') ? '&' : '?'}role=DOCTOR`
+      : null;
+
+    res.status(201).json({
+      appointment: serialize(fullAppt),
+      patientJoinUrl,
+      doctorJoinUrl,
+    });
   } catch (err) {
     next(err);
   }

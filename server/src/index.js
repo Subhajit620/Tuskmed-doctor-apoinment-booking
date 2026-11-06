@@ -8,7 +8,7 @@ const { startReminderJob } = require('./jobs/reminderJob');
 const app = createApp();
 const server = http.createServer(app);
 
-initIo(server, env.clientOrigin);
+initIo(server, true);
 startSlotSweeper();
 startReminderJob();
 

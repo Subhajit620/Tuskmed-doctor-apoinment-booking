@@ -6,6 +6,8 @@ const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
   ],
 };
 
@@ -28,9 +30,138 @@ export function useConsultationWebRTC({ appointmentId, user, onConsultationEnded
   const [inCallMessages, setInCallMessages] = useState([]);
 
   const pcRef = useRef(null);
+  const targetSocketIdRef = useRef(null);
+  const pendingCandidatesRef = useRef([]);
+  const makingOfferRef = useRef(false);
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const socketRef = useRef(null);
+
+  // Flush queued ICE candidates once remoteDescription is set
+  const flushPendingCandidates = async (pc) => {
+    if (!pc || !pc.remoteDescription) return;
+    const queue = pendingCandidatesRef.current.splice(0, pendingCandidatesRef.current.length);
+    for (const candidate of queue) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch {
+        // ignore stale candidate
+      }
+    }
+  };
+
+  // Helper to create RTCPeerConnection
+  const createPeerConnection = useCallback(
+    (targetSocketId, isCaller) => {
+      if (pcRef.current && targetSocketIdRef.current === targetSocketId && pcRef.current.connectionState !== 'closed' && pcRef.current.connectionState !== 'failed') {
+        if (isCaller && pcRef.current.signalingState === 'stable') {
+          makingOfferRef.current = true;
+          pcRef.current
+            .createOffer()
+            .then((offer) => pcRef.current.setLocalDescription(offer))
+            .then(() => {
+              socketRef.current?.emit('consultation:signal', {
+                to: targetSocketId,
+                signal: { sdp: pcRef.current.localDescription },
+                appointmentId,
+              });
+            })
+            .catch(() => {})
+            .finally(() => {
+              makingOfferRef.current = false;
+            });
+        }
+        return pcRef.current;
+      }
+
+      if (pcRef.current) {
+        try {
+          pcRef.current.close();
+        } catch {
+          // ignore
+        }
+      }
+
+      pendingCandidatesRef.current = [];
+      targetSocketIdRef.current = targetSocketId;
+
+      const pc = new RTCPeerConnection(RTC_CONFIG);
+      pcRef.current = pc;
+
+      // Add local tracks to peer connection
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => {
+          pc.addTrack(track, localStreamRef.current);
+        });
+      }
+
+      pc.ontrack = (event) => {
+        if (event.streams && event.streams[0]) {
+          setRemoteStream(event.streams[0]);
+        } else if (event.track) {
+          setRemoteStream((prev) => {
+            const ms = prev ? new MediaStream(prev.getTracks()) : new MediaStream();
+            ms.addTrack(event.track);
+            return ms;
+          });
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && socketRef.current) {
+          socketRef.current.emit('consultation:signal', {
+            to: targetSocketIdRef.current || targetSocketId,
+            signal: { candidate: event.candidate },
+            appointmentId,
+          });
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'failed' && isCaller) {
+          pc.createOffer({ iceRestart: true })
+            .then((offer) => pc.setLocalDescription(offer))
+            .then(() => {
+              socketRef.current?.emit('consultation:signal', {
+                to: targetSocketIdRef.current || targetSocketId,
+                signal: { sdp: pc.localDescription },
+                appointmentId,
+              });
+            })
+            .catch(() => {});
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'connected') {
+          setConnectionStatus('connected');
+        } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+          setConnectionStatus('disconnected');
+        }
+      };
+
+      if (isCaller) {
+        makingOfferRef.current = true;
+        pc.createOffer()
+          .then((offer) => pc.setLocalDescription(offer))
+          .then(() => {
+            socketRef.current?.emit('consultation:signal', {
+              to: targetSocketId,
+              signal: { sdp: pc.localDescription },
+              appointmentId,
+            });
+          })
+          .catch(() => {})
+          .finally(() => {
+            makingOfferRef.current = false;
+          });
+      }
+
+      return pc;
+    },
+    [appointmentId]
+  );
 
   // Initialize media and socket connection
   const initCall = useCallback(
@@ -64,53 +195,96 @@ export function useConsultationWebRTC({ appointmentId, user, onConsultationEnded
       const socket = getSocket();
       socketRef.current = socket;
 
-      // Join consultation room
-      socket.emit('consultation:join', {
-        appointmentId,
-        role: user.role,
-        name: user.name,
-      });
+      // Remove any duplicate listeners before re-attaching
+      socket.off('connect');
+      socket.off('consultation:room_peers');
+      socket.off('consultation:peer_joined');
+      socket.off('consultation:signal');
+      socket.off('consultation:peer_state');
+      socket.off('consultation:message');
+      socket.off('consultation:prescription');
+      socket.off('consultation:ended');
+      socket.off('consultation:peer_left');
 
-      // Handle room peers
+      const emitJoin = () => {
+        socket.emit('consultation:join', {
+          appointmentId,
+          role: user.role,
+          name: user.name,
+        });
+      };
+
+      // Handle room peers (we just joined and found existing peers in room)
       socket.on('consultation:room_peers', ({ peers }) => {
         if (peers && peers.length > 0) {
-          const peer = peers[0];
+          // Prefer opposite role (DOCTOR <-> PATIENT) so we never pair with our own duplicate tab
+          const oppositePeer = peers.find((p) => p.role && p.role !== user.role);
+          const peer = oppositePeer || peers[0];
           setRemotePeer(peer);
           // Initiate WebRTC offer as caller
           createPeerConnection(peer.socketId, true);
         }
       });
 
-      // Handle peer joined
+      // Handle peer joined (another peer joined after us)
       socket.on('consultation:peer_joined', (peer) => {
+        if (!peer) return;
+        // If we already have an active connection to the opposite role, ignore same-role duplicate tabs
+        if (peer.role && peer.role === user.role && remotePeer && remotePeer.role !== user.role) {
+          return;
+        }
         setRemotePeer(peer);
         createPeerConnection(peer.socketId, false);
       });
 
-      // Handle WebRTC signal
-      socket.on('consultation:signal', async ({ from, signal }) => {
+      // Handle WebRTC signal (SDP Offer/Answer + queued ICE Candidates + Polite Glare handling)
+      socket.on('consultation:signal', async ({ from, signal, senderInfo }) => {
+        if (!signal) return;
+        if (senderInfo && !remotePeer) {
+          setRemotePeer(senderInfo);
+        }
+
         let pc = pcRef.current;
-        if (!pc) {
+        if (!pc || (targetSocketIdRef.current && targetSocketIdRef.current !== from && signal.sdp?.type === 'offer')) {
           pc = createPeerConnection(from, false);
         }
 
-        if (signal.sdp) {
-          await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-          if (signal.sdp.type === 'offer') {
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            socket.emit('consultation:signal', {
-              to: from,
-              signal: { sdp: answer },
-              appointmentId,
-            });
+        try {
+          if (signal.sdp) {
+            const description = new RTCSessionDescription(signal.sdp);
+            const isPolite = user.role !== 'DOCTOR'; // Patient is polite peer on simultaneous offer glare
+            const offerCollision =
+              description.type === 'offer' && (makingOfferRef.current || pc.signalingState !== 'stable');
+
+            if (offerCollision) {
+              if (!isPolite) {
+                return; // Doctor ignores colliding offer; Patient will accept Doctor's offer
+              }
+              await pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+            }
+
+            await pc.setRemoteDescription(description);
+            await flushPendingCandidates(pc);
+
+            if (description.type === 'offer') {
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              socket.emit('consultation:signal', {
+                to: from,
+                signal: { sdp: pc.localDescription },
+                appointmentId,
+              });
+            }
+          } else if (signal.candidate) {
+            if (pc.remoteDescription && pc.remoteDescription.type) {
+              await pc.addIceCandidate(new RTCIceCandidate(signal.candidate)).catch(() => {});
+            } else {
+              // Queue ICE candidate until remoteDescription is set!
+              pendingCandidatesRef.current.push(signal.candidate);
+            }
           }
-        } else if (signal.candidate) {
-          try {
-            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-          } catch {
-            // ignore ICE errors
-          }
+        } catch {
+          // ignore transient signaling error
         }
       });
 
@@ -137,71 +311,26 @@ export function useConsultationWebRTC({ appointmentId, user, onConsultationEnded
       });
 
       // Handle peer left
-      socket.on('consultation:peer_left', () => {
-        setRemotePeer(null);
-        setRemoteStream(null);
+      socket.on('consultation:peer_left', ({ socketId }) => {
+        if (!targetSocketIdRef.current || targetSocketIdRef.current === socketId) {
+          setRemotePeer(null);
+          setRemoteStream(null);
+          targetSocketIdRef.current = null;
+        }
       });
+
+      // Emit join immediately and also re-emit on socket reconnect
+      socket.on('connect', emitJoin);
+      if (socket.connected) {
+        emitJoin();
+      } else {
+        socket.connect();
+      }
 
       setConnectionStatus('connected');
     },
-    [appointmentId, user, onConsultationEnded, onPrescriptionIssued]
+    [appointmentId, user, remotePeer, createPeerConnection, onConsultationEnded, onPrescriptionIssued]
   );
-
-  // Helper to create RTCPeerConnection
-  const createPeerConnection = (targetSocketId, isCaller) => {
-    if (pcRef.current) {
-      pcRef.current.close();
-    }
-
-    const pc = new RTCPeerConnection(RTC_CONFIG);
-    pcRef.current = pc;
-
-    // Add local tracks to peer connection
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, localStreamRef.current);
-      });
-    }
-
-    pc.ontrack = (event) => {
-      if (event.streams && event.streams[0]) {
-        setRemoteStream(event.streams[0]);
-      }
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current) {
-        socketRef.current.emit('consultation:signal', {
-          to: targetSocketId,
-          signal: { candidate: event.candidate },
-          appointmentId,
-        });
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        setConnectionStatus('connected');
-      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        setConnectionStatus('disconnected');
-      }
-    };
-
-    if (isCaller) {
-      pc.createOffer()
-        .then((offer) => pc.setLocalDescription(offer))
-        .then(() => {
-          socketRef.current?.emit('consultation:signal', {
-            to: targetSocketId,
-            signal: { sdp: pc.localDescription },
-            appointmentId,
-          });
-        })
-        .catch(() => {});
-    }
-
-    return pc;
-  };
 
   // Local Voice Volume Meter
   useEffect(() => {

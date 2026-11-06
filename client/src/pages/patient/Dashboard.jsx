@@ -1,6 +1,7 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../../api/client';
+import { getSocket } from '../../api/socket';
 import { useAuth } from '../../context/AuthContext';
 import { motion, AnimatePresence, AnimatedNumber } from '../../components/motion';
 import PrescriptionModal from '../../components/PrescriptionModal';
@@ -74,7 +75,7 @@ function formatWhen(date) {
 }
 
 export default function PatientDashboard() {
-  const { activePatient, account } = useAuth();
+  const { activePatient, account, refresh } = useAuth();
   const [topDoctor, setTopDoctor] = useState(null);
   const [upcomingAppt, setUpcomingAppt] = useState(null);
   const [upcomingList, setUpcomingList] = useState([]);
@@ -85,8 +86,27 @@ export default function PatientDashboard() {
   const [showVitalsModal, setShowVitalsModal] = useState(false);
   const [vitalForm, setVitalForm] = useState({ bp: '120/80', spo2: '99', pulse: '74', temp: '98.6', sugar: '95' });
   const [loading, setLoading] = useState(true);
+  const [reloadCounter, setReloadCounter] = useState(0);
   const [, setTick] = useState(0);
   const navigate = useNavigate();
+
+  // Refresh patient profile & appointments on mount and when Admin updates profile or books appointment
+  useEffect(() => {
+    refresh?.();
+    const socket = getSocket();
+    const onRealtimeSync = () => {
+      refresh?.();
+      setReloadCounter((c) => c + 1);
+    };
+    socket.on('patient:profile-updated', onRealtimeSync);
+    socket.on('appointment:created', onRealtimeSync);
+    socket.on('appointment:status', onRealtimeSync);
+    return () => {
+      socket.off('patient:profile-updated', onRealtimeSync);
+      socket.off('appointment:created', onRealtimeSync);
+      socket.off('appointment:status', onRealtimeSync);
+    };
+  }, [refresh]);
 
   // 30-second live update ticker for countdown / join window
   useEffect(() => {
@@ -182,7 +202,7 @@ export default function PatientDashboard() {
     return () => {
       isMounted = false;
     };
-  }, [activePatient]);
+  }, [activePatient, reloadCounter]);
 
   const minsToUpcoming = upcomingAppt?.slot?.start ? minutesUntil(upcomingAppt.slot.start) : null;
   const isExpired = upcomingAppt?.slot?.start ? isMeetingExpired(upcomingAppt.slot.start) : false;
@@ -195,10 +215,10 @@ export default function PatientDashboard() {
       animate="show"
       className="space-y-6 w-full max-w-6xl mx-auto pb-10"
     >
-      {/* 1. Welcoming Header Banner */}
+      {/* 1. Welcoming Header Banner & Registered Patient Details */}
       <motion.div
         variants={itemVariants}
-        className="rounded-3xl bg-gradient-to-r from-[#FAF3EC] via-[#FDF8F3] to-[#FAF1E6] border border-[#EEDCCB] p-6 sm:p-7 shadow-xs relative overflow-hidden"
+        className="rounded-3xl bg-gradient-to-r from-[#FAF3EC] via-[#FDF8F3] to-[#FAF1E6] border border-[#EEDCCB] p-6 sm:p-7 shadow-xs relative overflow-hidden space-y-5"
       >
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1.5">
@@ -235,12 +255,54 @@ export default function PatientDashboard() {
             </div>
           </div>
         </div>
+
+        {/* Registered Patient Profile Information Strip */}
+        <div className="pt-4 border-t border-[#EEDCCB]/80 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="bg-white/85 rounded-2xl border border-[#F0E5DA] px-3.5 py-2.5">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Patient Name</div>
+            <div className="font-extrabold text-slate-900 text-sm truncate mt-0.5">
+              {activePatient?.name || patientDisplayName}
+            </div>
+          </div>
+
+          <div className="bg-white/85 rounded-2xl border border-[#F0E5DA] px-3.5 py-2.5">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Age &amp; Gender</div>
+            <div className="font-extrabold text-slate-900 text-sm truncate mt-0.5">
+              {activePatient?.age !== undefined && activePatient?.age !== null ? `${activePatient.age} Yrs` : '—'}{' '}
+              <span className="text-slate-500 font-semibold">({activePatient?.gender || '—'})</span>
+            </div>
+          </div>
+
+          <div className="bg-white/85 rounded-2xl border border-[#F0E5DA] px-3.5 py-2.5">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Phone Number</div>
+            <div className="font-extrabold text-slate-900 text-sm font-mono truncate mt-0.5">
+              {activePatient?.mobile || account?.mobile || '—'}
+            </div>
+          </div>
+
+          <div className="bg-white/85 rounded-2xl border border-[#F0E5DA] px-3.5 py-2.5 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">City / Town</div>
+              <div className="font-extrabold text-slate-900 text-sm truncate mt-0.5">
+                {[activePatient?.city, activePatient?.state].filter(Boolean).join(', ') || 'Not specified'}
+              </div>
+            </div>
+            <Link
+              to="/patient/personal-info"
+              className="text-[11px] font-bold text-[#CAA067] hover:underline shrink-0"
+            >
+              Edit
+            </Link>
+          </div>
+        </div>
       </motion.div>
 
       {/* 2. LIVE / UPCOMING CONSULTATION PROMINENT CARD */}
       {upcomingAppt && (
         <motion.div
           variants={itemVariants}
+          initial="hidden"
+          animate="show"
           className="rounded-3xl bg-gradient-to-r from-[#1B365D] via-[#152D4F] to-[#0E2038] text-white p-5 sm:p-6 shadow-lg border border-[#2D4D7A] relative overflow-hidden"
         >
           <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-5">
@@ -407,7 +469,7 @@ export default function PatientDashboard() {
           {FEATURED_SPECIALITIES.map((spec) => (
             <Link
               key={spec.id}
-              to="/patient/doctors"
+              to={`/patient/doctors?speciality=${encodeURIComponent(spec.name)}`}
               className="bg-white rounded-2xl p-3 border border-[#F0E5DA] hover:border-[#CAA067] shadow-2xs hover:shadow-xs flex flex-col items-center text-center gap-1.5 group transition-all"
             >
               <div className="text-2xl transition-transform group-hover:scale-110">{spec.icon}</div>

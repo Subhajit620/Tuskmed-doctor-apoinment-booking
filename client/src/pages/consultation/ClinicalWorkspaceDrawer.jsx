@@ -819,6 +819,7 @@ export default function ClinicalWorkspaceDrawer({
           onClick={() => setShowPreviewModal(false)}
         >
           <div
+            id="prescription-print-area"
             onClick={(e) => e.stopPropagation()}
             className="max-w-2xl w-full bg-white text-slate-900 rounded-3xl p-6 sm:p-8 flex flex-col shadow-2xl overflow-y-auto max-h-[90vh]"
           >
@@ -826,7 +827,7 @@ export default function ClinicalWorkspaceDrawer({
             <div className="flex items-center justify-between border-b-2 border-slate-900/10 pb-4">
               <div>
                 <h2 className="text-xl font-extrabold text-slate-900 flex items-center gap-2">
-                  <span className="text-[#CAA067]">TUSTMED</span> CLINICAL TELEMEDICINE
+                  <span className="text-[#CAA067]">TUSKMED</span> CLINICAL TELEMEDICINE
                 </h2>
                 <p className="text-xs text-slate-500 font-semibold">
                   Consultation Rx Slip &middot; ID: {appointment?.id?.slice(0, 8).toUpperCase() || 'TX-901'}
@@ -835,7 +836,7 @@ export default function ClinicalWorkspaceDrawer({
               <button
                 type="button"
                 onClick={() => setShowPreviewModal(false)}
-                className="w-9 h-9 rounded-xl bg-slate-100 hover:bg-red-500 hover:text-white text-slate-800 flex items-center justify-center font-black text-base cursor-pointer border border-slate-300 shadow-xs transition-all shrink-0"
+                className="print:hidden w-9 h-9 rounded-xl bg-slate-100 hover:bg-red-500 hover:text-white text-slate-800 flex items-center justify-center font-black text-base cursor-pointer border border-slate-300 shadow-xs transition-all shrink-0"
                 title="Close (Esc)"
               >
                 ✕
@@ -927,10 +928,20 @@ export default function ClinicalWorkspaceDrawer({
                 <p className="font-bold text-emerald-600">✓ Digitally Signed &amp; Timestamped</p>
                 <p className="text-[10px]">Complies with Telemedicine Practice Guidelines</p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 print:hidden">
                 <button
                   type="button"
                   onClick={() => {
+                    const el = document.getElementById('prescription-print-area');
+                    if (el) {
+                      let portal = document.getElementById('prescription-print-portal');
+                      if (!portal) {
+                        portal = document.createElement('div');
+                        portal.id = 'prescription-print-portal';
+                        document.body.appendChild(portal);
+                      }
+                      portal.innerHTML = `<div class="bg-white text-slate-900 p-4">${el.innerHTML}</div>`;
+                    }
                     window.print();
                   }}
                   className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs hover:bg-slate-800 cursor-pointer"
